@@ -4,7 +4,10 @@ import { z } from 'zod'
 import Dialog from 'primevue/dialog'
 import InputText from 'primevue/inputtext'
 import InputNumber from 'primevue/inputnumber'
+import Select from 'primevue/select'
 import Button from 'primevue/button'
+import { useAuth } from '~/composables/useAuth'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { usePdvStore } from '../store/pdv.store'
 import type {
   CreatePdvDto,
@@ -25,8 +28,11 @@ const emit = defineEmits<{
 }>()
 
 const store = usePdvStore()
+const activeCommerceStore = useActiveCommerceStore()
+const { user: authUser } = useAuth()
 
 const isEditMode = computed<boolean>(() => props.pdv !== null)
+const isSuperAdmin = computed<boolean>(() => authUser.value?.role === 'SuperAdmin')
 const modalTitle = computed<string>(() =>
   isEditMode.value ? 'Editar punto de venta' : 'Nuevo punto de venta',
 )
@@ -35,6 +41,14 @@ const submitLabel = computed<string>(() =>
 )
 const isBusy = computed<boolean>(() => store.isCreating || store.isUpdating)
 
+// SA en creación elige commerce destino. CA usa siempre el suyo
+// (= activeCommerceStore.activeCommerceId), por eso ni ve este campo. En
+// edición no se cambia el dueño — el endpoint PATCH es commerce-scoped al
+// commerce dueño actual.
+const showCommerceSelector = computed<boolean>(() => {
+  return !isEditMode.value && isSuperAdmin.value
+})
+
 interface FormState {
   name: string
   address: string
@@ -42,6 +56,9 @@ interface FormState {
   lng: number | null
   phone: string
   email: string
+  // Solo se usa en SA + creación. Para CA viene implícito (su único / actual
+  // commerce), para edición se ignora (PATCH usa el commerceId del PdV).
+  targetCommerceId: string | null
 }
 
 function emptyForm(): FormState {
@@ -52,6 +69,9 @@ function emptyForm(): FormState {
     lng: null,
     phone: '',
     email: '',
+    // Prefill desde el commerce activo del sidebar — vacío en "Todos" para
+    // que el SA elija; pre-llenado y editable cuando hay uno específico.
+    targetCommerceId: activeCommerceStore.activeCommerceId,
   }
 }
 
@@ -64,6 +84,7 @@ function formFromPdv(p: PointOfSale): FormState {
     lng: p.location?.x ?? null,
     phone: p.phone ?? '',
     email: p.email ?? '',
+    targetCommerceId: p.commerceId,
   }
 }
 
@@ -133,6 +154,13 @@ async function handleSubmit(): Promise<void> {
   submitError.value = null
   fieldErrors.value = {}
 
+  // SA creando un PdV debe elegir commerce destino. Validamos antes del
+  // schema de los campos comunes para mostrar un mensaje claro.
+  if (showCommerceSelector.value && !form.targetCommerceId) {
+    fieldErrors.value = { targetCommerceId: 'Selecciona el comercio destino' }
+    return
+  }
+
   const parsed = schema.safeParse(form)
   if (!parsed.success) {
     applyZodErrors(parsed.error)
@@ -158,7 +186,11 @@ async function handleCreate(data: z.infer<typeof schema>): Promise<void> {
   if (data.email) dto.email = data.email
 
   try {
-    await store.createPdv(dto)
+    if (showCommerceSelector.value && form.targetCommerceId) {
+      await store.createPdv(dto, form.targetCommerceId)
+    } else {
+      await store.createPdv(dto)
+    }
     emit('created')
     closeModal()
   } catch (e) {
@@ -208,6 +240,21 @@ async function handleUpdate(data: z.infer<typeof schema>): Promise<void> {
   >
     <form class="form" @submit.prevent="handleSubmit">
       <div v-if="submitError" class="alert">{{ submitError }}</div>
+
+      <div v-if="showCommerceSelector" class="field">
+        <label class="field__label">Comercio destino <span class="field__req">*</span></label>
+        <Select
+          v-model="form.targetCommerceId"
+          :options="[...activeCommerceStore.accessibleCommerces]"
+          option-label="commerceName"
+          option-value="commerceId"
+          placeholder="Selecciona un comercio"
+          :class="{ 'field__input--error': fieldErrors.targetCommerceId }"
+        />
+        <span v-if="fieldErrors.targetCommerceId" class="field__error">
+          {{ fieldErrors.targetCommerceId }}
+        </span>
+      </div>
 
       <div class="field">
         <label class="field__label">Nombre <span class="field__req">*</span></label>
@@ -339,12 +386,14 @@ async function handleUpdate(data: z.infer<typeof schema>): Promise<void> {
 }
 
 .field :deep(.p-inputtext),
+.field :deep(.p-select),
 .field :deep(.p-inputnumber),
 .field :deep(.p-inputnumber-input) {
   width: 100%;
 }
 
 .field__input--error :deep(.p-inputtext),
+.field__input--error :deep(.p-select),
 .field__input--error :deep(.p-inputnumber-input) {
   border-color: var(--color-error) !important;
 }

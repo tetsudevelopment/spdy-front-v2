@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
+import { useAuthStore } from '~/stores/auth.store'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { humanizeAuthError } from '~/utils/error.utils'
 import { PdvService } from '../services/pdv.service'
 import type {
@@ -9,22 +11,26 @@ import type {
   UpdatePdvDto,
 } from '../types/pdv.types'
 
-interface CommerceRef {
-  commerceId: string
-  commerceName: string
-}
-
 interface Pagination {
   page: number
   limit: number
   total: number
 }
 
+// Tope defensivo cuando un SA en "Todos los comercios" abanica PdVs contra
+// cada commerce accesible. En la práctica los commerces tienen pocos PdVs
+// (decenas a lo sumo); 100 cubre con holgura. Si algún tenant tiene más, la
+// vista mostrará menos del total real — manejable hasta que el backend
+// exponga un endpoint agregado de PdVs.
+const FANOUT_LIMIT_PER_COMMERCE = 100
+
 export const usePdvStore = defineStore('pdv', () => {
-  // Commerce activo — los PdV viven bajo /commerce/:commerceId/pdv, así que
-  // todo el flujo depende de este valor.
-  const selectedCommerceId = ref<string | null>(null)
-  const availableCommerces = ref<CommerceRef[]>([])
+  const activeCommerceStore = useActiveCommerceStore()
+  const authStore = useAuthStore()
+
+  // Reactive shortcut al commerce activo del sidebar — el watcher de abajo
+  // dispara recargas cuando cambia.
+  const activeCommerceId = computed<string | null>(() => activeCommerceStore.activeCommerceId)
 
   const pdvs = ref<PointOfSale[]>([])
   const selectedPdv = ref<PointOfSale | null>(null)
@@ -50,16 +56,61 @@ export const usePdvStore = defineStore('pdv', () => {
     })
   })
 
+  // Indica si hay un scope válido para listar PdVs:
+  //   - activeCommerceId !== null → siempre.
+  //   - activeCommerceId === null → solo SA puede ver "Todos los comercios".
+  const canQuery = computed<boolean>(() => {
+    if (activeCommerceId.value !== null) return true
+    return authStore.user?.role === 'SuperAdmin'
+  })
+
   async function fetchPdvs(params: ListPdvParams = {}): Promise<void> {
-    if (!selectedCommerceId.value) {
-      pdvs.value = []
-      pagination.value = { page: 1, limit: 20, total: 0 }
+    const cId = activeCommerceId.value
+
+    if (cId === null) {
+      // "Todos los comercios": SA fanea contra cada commerce accesible.
+      // Otros roles no deberían llegar (initFromAuth los fuerza a un commerce);
+      // si llegan por edge-case, vacío.
+      if (authStore.user?.role !== 'SuperAdmin') {
+        pdvs.value = []
+        pagination.value = { page: 1, limit: 20, total: 0 }
+        return
+      }
+      const accessible = activeCommerceStore.accessibleCommerces
+      if (accessible.length === 0) {
+        pdvs.value = []
+        pagination.value = { page: 1, limit: 20, total: 0 }
+        return
+      }
+      isLoading.value = true
+      error.value = null
+      try {
+        const responses = await Promise.all(
+          accessible.map((c) =>
+            PdvService.getAll(c.commerceId, {
+              page: 1,
+              limit: FANOUT_LIMIT_PER_COMMERCE,
+              isActive: params.isActive,
+            }),
+          ),
+        )
+        const merged = responses.flatMap((r) => r.data)
+        pdvs.value = merged
+        // Sin paginación coherente al fanear out — total = conteo agregado.
+        pagination.value = { page: 1, limit: merged.length, total: merged.length }
+      } catch (e) {
+        error.value = humanizeAuthError(e)
+      } finally {
+        isLoading.value = false
+      }
       return
     }
+
+    // Commerce específico — scoped al tenant.
     isLoading.value = true
     error.value = null
     try {
-      const res = await PdvService.getAll(selectedCommerceId.value, {
+      const res = await PdvService.getAll(cId, {
         page: params.page ?? pagination.value.page,
         limit: params.limit ?? pagination.value.limit,
         isActive: params.isActive,
@@ -73,11 +124,29 @@ export const usePdvStore = defineStore('pdv', () => {
     }
   }
 
-  async function fetchById(pdvId: string): Promise<PointOfSale | null> {
-    if (!selectedCommerceId.value) return null
+  // Resuelve el commerceId para una operación sobre un PdV específico.
+  // Preferimos el de la entidad (que viaja en el tipo y nunca es null) y
+  // caemos al activo solo si el PdV no está en memoria — caso casi imposible
+  // con el flujo actual, pero defensivo.
+  function resolveCommerceFor(pdvId: string): string | null {
+    const inMemory = pdvs.value.find((p) => p.id === pdvId)
+    if (inMemory) return inMemory.commerceId
+    if (selectedPdv.value?.id === pdvId) return selectedPdv.value.commerceId
+    return activeCommerceId.value
+  }
+
+  // El callsite (modales) puede pasar commerceId explícito para evitar lookup
+  // — útil cuando el PdV se conoce por props pero todavía no entró al listado
+  // del store (ej: deep-link o fetch fresco).
+  async function fetchById(
+    pdvId: string,
+    options: { commerceId?: string } = {},
+  ): Promise<PointOfSale | null> {
+    const cId = options.commerceId ?? resolveCommerceFor(pdvId)
+    if (!cId) return null
     error.value = null
     try {
-      const pdv = await PdvService.getById(selectedCommerceId.value, pdvId)
+      const pdv = await PdvService.getById(cId, pdvId)
       selectedPdv.value = pdv
       // Mantén el item en el listado sincronizado — el listado puede venir
       // sin `zones` y el detalle sí las trae.
@@ -90,14 +159,18 @@ export const usePdvStore = defineStore('pdv', () => {
     }
   }
 
-  async function createPdv(dto: CreatePdvDto): Promise<PointOfSale> {
-    if (!selectedCommerceId.value) {
-      throw new Error('No hay comercio seleccionado')
-    }
+  // Crear PdV: bajo /commerce/:cId/pdv. Si llaman sin `targetCommerceId`,
+  // usamos el commerce activo del sidebar.
+  async function createPdv(
+    dto: CreatePdvDto,
+    targetCommerceId?: string,
+  ): Promise<PointOfSale> {
+    const cId = targetCommerceId ?? activeCommerceId.value
+    if (!cId) throw new Error('No hay comercio seleccionado')
     isCreating.value = true
     error.value = null
     try {
-      const created = await PdvService.create(selectedCommerceId.value, dto)
+      const created = await PdvService.create(cId, dto)
       await fetchPdvs({ page: 1 })
       return created
     } catch (e) {
@@ -110,13 +183,12 @@ export const usePdvStore = defineStore('pdv', () => {
   }
 
   async function updatePdv(pdvId: string, dto: UpdatePdvDto): Promise<PointOfSale> {
-    if (!selectedCommerceId.value) {
-      throw new Error('No hay comercio seleccionado')
-    }
+    const cId = resolveCommerceFor(pdvId)
+    if (!cId) throw new Error('No se puede editar un PdV sin commerce dueño')
     isUpdating.value = true
     error.value = null
     try {
-      const updated = await PdvService.update(selectedCommerceId.value, pdvId, dto)
+      const updated = await PdvService.update(cId, pdvId, dto)
       await fetchPdvs({ page: pagination.value.page })
       if (selectedPdv.value?.id === pdvId) {
         selectedPdv.value = updated
@@ -134,9 +206,8 @@ export const usePdvStore = defineStore('pdv', () => {
   // Diff-based: el backend expone POST (asignar) y DELETE (desasignar) por
   // separado. Calculamos el delta y disparamos las llamadas que correspondan.
   async function assignZones(pdvId: string, targetZoneIds: string[]): Promise<void> {
-    if (!selectedCommerceId.value) {
-      throw new Error('No hay comercio seleccionado')
-    }
+    const cId = resolveCommerceFor(pdvId)
+    if (!cId) throw new Error('No se puede gestionar zonas de un PdV sin commerce dueño')
     error.value = null
     const current = pdvs.value.find((p) => p.id === pdvId)
     const currentIds = current?.zones?.map((z) => z.id) ?? []
@@ -145,13 +216,13 @@ export const usePdvStore = defineStore('pdv', () => {
 
     try {
       if (toAdd.length > 0) {
-        await PdvService.assignZones(selectedCommerceId.value, pdvId, toAdd)
+        await PdvService.assignZones(cId, pdvId, toAdd)
       }
       for (const zoneId of toRemove) {
-        await PdvService.removeZone(selectedCommerceId.value, pdvId, zoneId)
+        await PdvService.removeZone(cId, pdvId, zoneId)
       }
       // Refrescar el detalle con zonas desde el backend
-      const fresh = await PdvService.getById(selectedCommerceId.value, pdvId)
+      const fresh = await PdvService.getById(cId, pdvId)
       const idx = pdvs.value.findIndex((p) => p.id === pdvId)
       if (idx !== -1) pdvs.value[idx] = fresh
       if (selectedPdv.value?.id === pdvId) selectedPdv.value = fresh
@@ -163,13 +234,12 @@ export const usePdvStore = defineStore('pdv', () => {
   }
 
   async function removeZone(pdvId: string, zoneId: string): Promise<void> {
-    if (!selectedCommerceId.value) {
-      throw new Error('No hay comercio seleccionado')
-    }
+    const cId = resolveCommerceFor(pdvId)
+    if (!cId) throw new Error('No se puede gestionar zonas de un PdV sin commerce dueño')
     error.value = null
     try {
-      await PdvService.removeZone(selectedCommerceId.value, pdvId, zoneId)
-      const fresh = await PdvService.getById(selectedCommerceId.value, pdvId)
+      await PdvService.removeZone(cId, pdvId, zoneId)
+      const fresh = await PdvService.getById(cId, pdvId)
       const idx = pdvs.value.findIndex((p) => p.id === pdvId)
       if (idx !== -1) pdvs.value[idx] = fresh
       if (selectedPdv.value?.id === pdvId) selectedPdv.value = fresh
@@ -180,31 +250,21 @@ export const usePdvStore = defineStore('pdv', () => {
     }
   }
 
-  function setSelectedCommerce(commerceId: string | null): void {
-    selectedCommerceId.value = commerceId
-  }
-
-  function setAvailableCommerces(list: CommerceRef[]): void {
-    availableCommerces.value = list
-  }
-
   function setSearch(value: string): void {
     search.value = value
   }
 
-  // Auto-recarga al cambiar el commerce activo. Cada commerce tiene su propia
-  // paginación — reseteamos a la primera página.
-  watch(selectedCommerceId, async (id) => {
+  // Cuando cambia el commerce del sidebar, recargamos. Cada commerce tiene
+  // su propia paginación — reseteamos a la primera página.
+  watch(activeCommerceId, async () => {
     search.value = ''
     selectedPdv.value = null
     pagination.value = { page: 1, limit: 20, total: 0 }
-    if (id) await fetchPdvs({ page: 1 })
-    else pdvs.value = []
+    await fetchPdvs({ page: 1 })
   })
 
   return {
-    selectedCommerceId,
-    availableCommerces,
+    activeCommerceId,
     pdvs,
     selectedPdv,
     pagination,
@@ -214,14 +274,13 @@ export const usePdvStore = defineStore('pdv', () => {
     error,
     search,
     filteredPdvs,
+    canQuery,
     fetchPdvs,
     fetchById,
     createPdv,
     updatePdv,
     assignZones,
     removeZone,
-    setSelectedCommerce,
-    setAvailableCommerces,
     setSearch,
   }
 })

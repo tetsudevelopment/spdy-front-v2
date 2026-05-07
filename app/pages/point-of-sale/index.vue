@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import InputText from 'primevue/inputtext'
-import Select from 'primevue/select'
 import Button from 'primevue/button'
 import Toast from 'primevue/toast'
 import { useAuth } from '~/composables/useAuth'
 import { useAppToast } from '~/composables/useToast'
-import { useCommerceStore } from '~/modules/commerce/store/commerce.store'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { usePdvStore } from '~/modules/pdv/store/pdv.store'
 import PdvTable from '~/modules/pdv/components/PdvTable.vue'
 import CreatePdvModal from '~/modules/pdv/components/CreatePdvModal.vue'
@@ -18,14 +17,9 @@ definePageMeta({
   allowedRoles: ['SuperAdmin', 'CommerceAdmin'],
 })
 
-interface CommerceOption {
-  commerceId: string
-  commerceName: string
-}
-
 const { user: authUser } = useAuth()
 const toast = useAppToast()
-const commerceStore = useCommerceStore()
+const activeCommerceStore = useActiveCommerceStore()
 const pdvStore = usePdvStore()
 
 const isSuperAdmin = computed<boolean>(() => authUser.value?.role === 'SuperAdmin')
@@ -35,65 +29,27 @@ const showAssignZonesModal = ref<boolean>(false)
 const editingPdv = ref<PointOfSale | null>(null)
 const zonesPdv = ref<PointOfSale | null>(null)
 
-// El Dropdown solo aparece si hay más de un commerce disponible o el rol es SA
-// (SA puede tener 0 asignados pero sí acceso global).
-const showCommerceSelector = computed<boolean>(() => {
-  return isSuperAdmin.value || pdvStore.availableCommerces.length > 1
+// Para crear PdV necesitamos un commerce destino:
+//  - activeCommerceId !== null → siempre.
+//  - activeCommerceId === null + SA → el modal le pide cuál.
+//  - activeCommerceId === null + CA → false (sin commerces accesibles).
+const canCreate = computed<boolean>(() => {
+  if (activeCommerceStore.activeCommerceId !== null) return true
+  return isSuperAdmin.value
 })
 
-const hasCommerceSelected = computed<boolean>(
-  () => pdvStore.selectedCommerceId !== null,
-)
-
-const noPdvsForSelected = computed<boolean>(() => {
+const noPdvsForScope = computed<boolean>(() => {
   return (
-    hasCommerceSelected.value &&
+    pdvStore.canQuery &&
     !pdvStore.isLoading &&
     pdvStore.pdvs.length === 0 &&
     !pdvStore.error
   )
 })
 
-async function loadCommerces(): Promise<void> {
-  if (isSuperAdmin.value) {
-    // SA ve todos — tiramos del store de commerces para alimentar el dropdown.
-    if (commerceStore.commerces.length === 0) {
-      await commerceStore.fetchCommerces()
-    }
-    const list: CommerceOption[] = commerceStore.commerces.map((c) => ({
-      commerceId: c.id,
-      commerceName: c.name,
-    }))
-    pdvStore.setAvailableCommerces(list)
-  } else {
-    // CommerceAdmin / Supervisor — usan el campo commerces del propio user.
-    const assigned = authUser.value?.commerces ?? []
-    pdvStore.setAvailableCommerces([...assigned])
-  }
-
-  // Autoseleccionar el primero si aún no hay uno activo.
-  if (!pdvStore.selectedCommerceId) {
-    const first = pdvStore.availableCommerces[0]
-    if (first) pdvStore.setSelectedCommerce(first.commerceId)
-  }
-}
-
 onMounted(async () => {
-  await loadCommerces()
+  await pdvStore.fetchPdvs({ page: 1 })
 })
-
-// Si el usuario cambia (ej: logout/login), recargar la lista.
-watch(
-  () => authUser.value?.id,
-  async () => {
-    pdvStore.setSelectedCommerce(null)
-    await loadCommerces()
-  },
-)
-
-function onCommerceChange(value: string | null): void {
-  pdvStore.setSelectedCommerce(value)
-}
 
 function onSearchInput(value: string | undefined): void {
   pdvStore.setSearch(value ?? '')
@@ -147,7 +103,7 @@ function onZonesSaved(): void {
     <header class="pdv-page__header">
       <div class="pdv-page__title">
         <h1>Puntos de venta</h1>
-        <span v-if="hasCommerceSelected" class="pdv-page__count">
+        <span v-if="pdvStore.canQuery" class="pdv-page__count">
           {{ pdvStore.filteredPdvs.length }}
         </span>
       </div>
@@ -155,31 +111,19 @@ function onZonesSaved(): void {
         label="Nuevo PdV"
         icon="pi pi-plus"
         severity="primary"
-        :disabled="!hasCommerceSelected"
+        :disabled="!canCreate"
         @click="openCreate"
       />
     </header>
 
     <div class="pdv-page__filters">
-      <Select
-        v-if="showCommerceSelector"
-        :model-value="pdvStore.selectedCommerceId"
-        :options="[...pdvStore.availableCommerces]"
-        option-label="commerceName"
-        option-value="commerceId"
-        placeholder="Selecciona un comercio"
-        class="filter-commerce"
-        :show-clear="false"
-        @update:model-value="onCommerceChange"
-      />
-
       <span class="search">
         <i class="pi pi-search search__icon" aria-hidden="true" />
         <InputText
           :model-value="pdvStore.search"
           placeholder="Buscar por nombre, dirección, email o teléfono"
           class="search__input"
-          :disabled="!hasCommerceSelected"
+          :disabled="!pdvStore.canQuery"
           @update:model-value="onSearchInput"
         />
       </span>
@@ -187,23 +131,29 @@ function onZonesSaved(): void {
 
     <div v-if="pdvStore.error" class="pdv-page__error">{{ pdvStore.error }}</div>
 
-    <!-- Empty state: sin commerce seleccionado -->
-    <div v-if="!hasCommerceSelected" class="empty">
+    <!-- Empty: CA sin commerces accesibles (edge case) -->
+    <div v-if="!pdvStore.canQuery" class="empty">
       <i class="pi pi-building empty__icon" aria-hidden="true" />
-      <h2 class="empty__title">Selecciona un comercio</h2>
+      <h2 class="empty__title">Sin comercios accesibles</h2>
       <p class="empty__hint">
-        Elige un comercio en el selector para ver y gestionar sus puntos de venta.
+        Tu cuenta no tiene comercios asignados. Pedí al SuperAdmin que te
+        habilite acceso a uno.
       </p>
     </div>
 
-    <!-- Empty state: commerce seleccionado pero sin PdVs -->
-    <div v-else-if="noPdvsForSelected" class="empty">
+    <!-- Empty: scope válido pero sin PdVs -->
+    <div v-else-if="noPdvsForScope" class="empty">
       <i class="pi pi-shop empty__icon" aria-hidden="true" />
-      <h2 class="empty__title">Este comercio aún no tiene puntos de venta</h2>
+      <h2 class="empty__title">No hay puntos de venta para mostrar</h2>
       <p class="empty__hint">
         Crea el primero para empezar a gestionar coberturas y asignaciones.
       </p>
-      <Button label="Crear punto de venta" icon="pi pi-plus" @click="openCreate" />
+      <Button
+        v-if="canCreate"
+        label="Crear punto de venta"
+        icon="pi pi-plus"
+        @click="openCreate"
+      />
     </div>
 
     <PdvTable
@@ -263,10 +213,6 @@ function onZonesSaved(): void {
   display: flex;
   gap: 12px;
   align-items: center;
-}
-
-.filter-commerce {
-  min-width: 240px;
 }
 
 .search {

@@ -46,11 +46,14 @@ const hasChanges = computed<boolean>(() => {
 })
 
 async function loadZones(): Promise<void> {
-  if (!store.selectedCommerceId) return
+  // Usamos el commerceId del propio PdV — siempre presente en el tipo y
+  // correcto incluso cuando el SA está en "Todos los comercios" (cada PdV
+  // pertenece a su tenant, independiente del sidebar).
+  if (!props.pdv) return
   isLoadingZones.value = true
   submitError.value = null
   try {
-    const list = await PdvService.listZonesForCommerce(store.selectedCommerceId)
+    const list = await PdvService.listZonesForCommerce(props.pdv.commerceId)
     availableZones.value = list.filter((z) => z.isActive)
   } catch (e) {
     submitError.value = humanizeAuthError(e)
@@ -62,8 +65,10 @@ async function loadZones(): Promise<void> {
 async function hydrateDetail(): Promise<void> {
   if (!props.pdv) return
   // Refrescamos el detalle para tener la lista fiable de zones — el endpoint
-  // de listado puede devolverla parcial o vacía.
-  const fresh = await store.fetchById(props.pdv.id)
+  // de listado puede devolverla parcial o vacía. Pasamos commerceId explícito
+  // por si el PdV no está aún en el listado del store (ej: SA en "Todos" que
+  // todavía no abrió el commerce dueño).
+  const fresh = await store.fetchById(props.pdv.id, { commerceId: props.pdv.commerceId })
   detailZones.value = fresh?.zones ?? []
   selectedZoneIds.value = (fresh?.zones ?? []).map((z) => z.id)
 }
