@@ -1,0 +1,18 @@
+@import "tailwindcss";
+@import "primeicons/primeicons.css";
+
+:root {
+  --color-bg:      #161616;
+  --color-surface: #262625;
+  --color-brand:   #49fb7c;
+  --color-border:  #333332;
+  --color-text:    #F0F0F0;
+  --color-muted:   #8A8A88;
+  --color-error:   #ff4d4f;
+  --color-warning: #faad14;
+}
+
+html, body {
+  background: var(--color-bg);
+  color: var(--color-text);
+}
