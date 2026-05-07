@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import Dialog from 'primevue/dialog'
 import MultiSelect from 'primevue/multiselect'
 import Button from 'primevue/button'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { useZonesStore } from '../store/zones.store'
 import type { CommerceRef, Zone } from '../types/zone.types'
 
@@ -18,6 +19,7 @@ const emit = defineEmits<{
 }>()
 
 const store = useZonesStore()
+const activeCommerceStore = useActiveCommerceStore()
 
 const selectedCommerceIds = ref<string[]>([])
 const submitError = ref<string | null>(null)
@@ -96,7 +98,7 @@ async function handleCopy(): Promise<void> {
         <label class="field__label">Comercios destino <span class="field__req">*</span></label>
         <MultiSelect
           v-model="selectedCommerceIds"
-          :options="[...store.availableCommerces]"
+          :options="[...activeCommerceStore.accessibleCommerces]"
           option-label="commerceName"
           option-value="commerceId"
           placeholder="Selecciona uno o más comercios"

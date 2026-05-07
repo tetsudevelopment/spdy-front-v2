@@ -1,18 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import InputText from 'primevue/inputtext'
-import Select from 'primevue/select'
 import Button from 'primevue/button'
 import Toast from 'primevue/toast'
 import { useAuth } from '~/composables/useAuth'
 import { useAppToast } from '~/composables/useToast'
-import { useCommerceStore } from '~/modules/commerce/store/commerce.store'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { useZonesStore } from '~/modules/zones/store/zones.store'
 import ZonesTable from '~/modules/zones/components/ZonesTable.vue'
 import CreateZoneModal from '~/modules/zones/components/CreateZoneModal.vue'
 import ZoneMapPreview from '~/modules/zones/components/ZoneMapPreview.vue'
 import CopyZoneModal from '~/modules/zones/components/CopyZoneModal.vue'
-import type { CommerceRef, Zone, ZoneViewMode } from '~/modules/zones/types/zone.types'
+import type { Zone, ZoneViewMode } from '~/modules/zones/types/zone.types'
 
 definePageMeta({
   layout: 'default',
@@ -21,7 +20,7 @@ definePageMeta({
 
 const { user: authUser } = useAuth()
 const toast = useAppToast()
-const commerceStore = useCommerceStore()
+const activeCommerceStore = useActiveCommerceStore()
 const zonesStore = useZonesStore()
 
 const isSuperAdmin = computed<boolean>(() => authUser.value?.role === 'SuperAdmin')
@@ -33,17 +32,15 @@ const editingZone = ref<Zone | null>(null)
 const previewZone = ref<Zone | null>(null)
 const copyZoneTarget = ref<Zone | null>(null)
 
-const showCommerceSelector = computed<boolean>(() => {
-  if (zonesStore.viewMode !== 'commerce') return false
-  return isSuperAdmin.value || zonesStore.availableCommerces.length > 1
-})
-
-// El botón "Nueva zona" requiere que haya un destino claro:
-//  - modo Global (solo SA disponible): siempre habilitado
-//  - modo Commerce: exige un commerce seleccionado
+// El botón "Nueva zona" requiere un destino claro:
+//  - 'global' (solo SA): siempre.
+//  - 'commerce' + uuid: siempre.
+//  - 'commerce' + null + SA: el modal le pide que elija comercio destino.
+//  - 'commerce' + null + CA: false (sin commerces accesibles).
 const canCreate = computed<boolean>(() => {
   if (zonesStore.viewMode === 'global') return isSuperAdmin.value
-  return zonesStore.selectedCommerceId !== null
+  if (activeCommerceStore.activeCommerceId !== null) return true
+  return isSuperAdmin.value
 })
 
 const noResults = computed<boolean>(() => {
@@ -63,55 +60,18 @@ const tabs = computed<ReadonlyArray<{ label: string; value: ZoneViewMode }>>(() 
   return list
 })
 
-async function loadCommerces(): Promise<void> {
-  if (isSuperAdmin.value) {
-    if (commerceStore.commerces.length === 0) {
-      await commerceStore.fetchCommerces()
-    }
-    const list: CommerceRef[] = commerceStore.commerces.map((c) => ({
-      commerceId: c.id,
-      commerceName: c.name,
-    }))
-    zonesStore.setAvailableCommerces(list)
-  } else {
-    const assigned = authUser.value?.commerces ?? []
-    zonesStore.setAvailableCommerces([...assigned])
-  }
-}
-
 onMounted(async () => {
   // Por defecto: SA aterriza en Globales; CA y Supervisor en Privadas.
   zonesStore.setViewMode(isSuperAdmin.value ? 'global' : 'commerce')
-  await loadCommerces()
-  if (zonesStore.viewMode === 'commerce' && !zonesStore.selectedCommerceId) {
-    const first = zonesStore.availableCommerces[0]
-    if (first) zonesStore.setSelectedCommerce(first.commerceId)
-  }
-  // Primer fetch explícito — los watchers también lo harían al cambiar, pero
-  // en el primer montaje el estado puede no haber cambiado.
+  // El watcher de viewMode dispara la carga, pero en el primer mount es
+  // posible que el watcher no haya corrido si el setter no cambió el valor
+  // (defaults coinciden). Forzamos el primer fetch.
   await zonesStore.fetchZones({ page: 1 })
 })
-
-watch(
-  () => authUser.value?.id,
-  async () => {
-    zonesStore.setSelectedCommerce(null)
-    zonesStore.setViewMode(isSuperAdmin.value ? 'global' : 'commerce')
-    await loadCommerces()
-  },
-)
 
 function onTabChange(mode: ZoneViewMode): void {
   if (mode === zonesStore.viewMode) return
   zonesStore.setViewMode(mode)
-  if (mode === 'commerce' && !zonesStore.selectedCommerceId) {
-    const first = zonesStore.availableCommerces[0]
-    if (first) zonesStore.setSelectedCommerce(first.commerceId)
-  }
-}
-
-function onCommerceChange(value: string | null): void {
-  zonesStore.setSelectedCommerce(value)
 }
 
 function onSearchInput(value: string | undefined): void {
@@ -197,18 +157,6 @@ function onCopied(count: number): void {
     </div>
 
     <div class="zones-page__filters">
-      <Select
-        v-if="showCommerceSelector"
-        :model-value="zonesStore.selectedCommerceId"
-        :options="[...zonesStore.availableCommerces]"
-        option-label="commerceName"
-        option-value="commerceId"
-        placeholder="Selecciona un comercio"
-        class="filter-commerce"
-        :show-clear="false"
-        @update:model-value="onCommerceChange"
-      />
-
       <span class="search">
         <i class="pi pi-search search__icon" aria-hidden="true" />
         <InputText
@@ -223,15 +171,16 @@ function onCopied(count: number): void {
 
     <div v-if="zonesStore.error" class="zones-page__error">{{ zonesStore.error }}</div>
 
-    <!-- Empty: modo Privadas sin commerce seleccionado -->
+    <!-- Empty: CA sin commerces accesibles (edge case) -->
     <div
-      v-if="zonesStore.viewMode === 'commerce' && !zonesStore.selectedCommerceId"
+      v-if="zonesStore.viewMode === 'commerce' && !zonesStore.canQuery"
       class="empty"
     >
       <i class="pi pi-building empty__icon" aria-hidden="true" />
-      <h2 class="empty__title">Selecciona un comercio</h2>
+      <h2 class="empty__title">Sin comercios accesibles</h2>
       <p class="empty__hint">
-        Elige un comercio para ver y gestionar sus zonas privadas.
+        Tu cuenta no tiene comercios asignados. Pedí al SuperAdmin que te
+        habilite acceso a uno.
       </p>
     </div>
 
@@ -242,7 +191,7 @@ function onCopied(count: number): void {
         {{
           zonesStore.viewMode === 'global'
             ? 'Aún no hay zonas globales'
-            : 'Este comercio aún no tiene zonas'
+            : 'No hay zonas privadas para mostrar'
         }}
       </h2>
       <p class="empty__hint">
@@ -351,10 +300,6 @@ function onCopied(count: number): void {
   display: flex;
   gap: 12px;
   align-items: center;
-}
-
-.filter-commerce {
-  min-width: 240px;
 }
 
 .search {

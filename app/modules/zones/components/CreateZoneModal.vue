@@ -10,6 +10,7 @@ import RadioButton from 'primevue/radiobutton'
 import Select from 'primevue/select'
 import Button from 'primevue/button'
 import { useAuth } from '~/composables/useAuth'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { useZonesStore } from '../store/zones.store'
 import type {
   CreateZoneDto,
@@ -30,6 +31,7 @@ const emit = defineEmits<{
 }>()
 
 const store = useZonesStore()
+const activeCommerceStore = useActiveCommerceStore()
 const { user: authUser } = useAuth()
 
 const isEditMode = computed<boolean>(() => props.zone !== null)
@@ -66,7 +68,11 @@ function emptyForm(): FormState {
     priority: 0,
     // Por defecto: SA crea Global; CA siempre crea Private contra su commerce.
     kind: isSuperAdmin.value ? 'global' : 'private',
-    commerceId: isSuperAdmin.value ? null : store.selectedCommerceId,
+    // Prefill desde el commerce activo del sidebar — sirve tanto para el SA
+    // que cambia a 'private' (queda con el activo) como para el CA (su
+    // único / actual commerce). Si el SA está en "Todos los comercios"
+    // queda null y el campo aparece vacío para que elija.
+    commerceId: activeCommerceStore.activeCommerceId,
   }
 }
 
@@ -293,7 +299,7 @@ async function handleUpdate(data: z.infer<typeof schema>): Promise<void> {
         <label class="field__label">Comercio destino <span class="field__req">*</span></label>
         <Select
           v-model="form.commerceId"
-          :options="[...store.availableCommerces]"
+          :options="[...activeCommerceStore.accessibleCommerces]"
           option-label="commerceName"
           option-value="commerceId"
           placeholder="Selecciona un comercio"

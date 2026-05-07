@@ -1,9 +1,10 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
+import { useAuthStore } from '~/stores/auth.store'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { humanizeAuthError } from '~/utils/error.utils'
 import { ZonesService } from '../services/zones.service'
 import type {
-  CommerceRef,
   CreateZoneDto,
   ListZonesParams,
   UpdateZoneDto,
@@ -17,13 +18,27 @@ interface Pagination {
   total: number
 }
 
+// Tope defensivo cuando un SA en "Todos los comercios" abanica privadas
+// contra cada commerce accesible. En la práctica las comercios tienen <20
+// zonas; 100 cubre con holgura. Si en el futuro hay tenants con más, este
+// store debería migrar a un endpoint agregado del backend.
+const FANOUT_LIMIT_PER_COMMERCE = 100
+
 export const useZonesStore = defineStore('zones', () => {
-  // viewMode decide desde qué endpoint se listan las zonas:
-  //   'global'   → GET /zones (solo SA)
-  //   'commerce' → GET /commerce/:selectedCommerceId/zones
+  const activeCommerceStore = useActiveCommerceStore()
+  const authStore = useAuthStore()
+
+  // viewMode decide la familia de listados:
+  //   'global'   → GET /zones (solo SA — pestaña 'Globales')
+  //   'commerce' → privadas, alineadas al sidebar (activeCommerceId):
+  //                  uuid  → GET /commerce/:cId/zones
+  //                  null  → SA only ("Todos los comercios"): fan-out por
+  //                          cada commerce accesible y merge.
   const viewMode = ref<ZoneViewMode>('global')
-  const selectedCommerceId = ref<string | null>(null)
-  const availableCommerces = ref<CommerceRef[]>([])
+
+  // Reactive shortcut al commerce activo del sidebar — los watchers de abajo
+  // disparan recargas cuando cambia (excepto en vista 'global').
+  const activeCommerceId = computed<string | null>(() => activeCommerceStore.activeCommerceId)
 
   const zones = ref<Zone[]>([])
   const selectedZone = ref<Zone | null>(null)
@@ -47,17 +62,83 @@ export const useZonesStore = defineStore('zones', () => {
   })
 
   // ¿Tenemos los params suficientes para tirar de la API en el modo actual?
+  //   - 'global': siempre.
+  //   - 'commerce' + uuid: siempre.
+  //   - 'commerce' + null: solo SA puede (vista "Todos"). CA sin commerces
+  //     llega aquí por edge-case y queda en false.
   const canQuery = computed<boolean>(() => {
     if (viewMode.value === 'global') return true
-    return selectedCommerceId.value !== null
+    if (activeCommerceId.value !== null) return true
+    return authStore.user?.role === 'SuperAdmin'
   })
 
   async function fetchZones(params: ListZonesParams = {}): Promise<void> {
-    if (!canQuery.value) {
-      zones.value = []
-      pagination.value = { page: 1, limit: 20, total: 0 }
+    if (viewMode.value === 'global') {
+      // Globales del sistema — endpoint /zones, ignora el sidebar.
+      isLoading.value = true
+      error.value = null
+      try {
+        const res = await ZonesService.getAll({
+          page: params.page ?? pagination.value.page,
+          limit: params.limit ?? pagination.value.limit,
+          isActive: params.isActive,
+        })
+        zones.value = res.data
+        pagination.value = { page: res.page, limit: res.limit, total: res.total }
+      } catch (e) {
+        error.value = humanizeAuthError(e)
+      } finally {
+        isLoading.value = false
+      }
       return
     }
+
+    // viewMode === 'commerce' — privadas alineadas al sidebar.
+    const cId = activeCommerceId.value
+
+    if (cId === null) {
+      // "Todos los comercios": SA fanea contra cada commerce accesible.
+      // Otros roles no deberían llegar (initFromAuth los fuerza a un commerce);
+      // si llegan por edge-case, vacío.
+      if (authStore.user?.role !== 'SuperAdmin') {
+        zones.value = []
+        pagination.value = { page: 1, limit: 20, total: 0 }
+        return
+      }
+      const accessible = activeCommerceStore.accessibleCommerces
+      if (accessible.length === 0) {
+        zones.value = []
+        pagination.value = { page: 1, limit: 20, total: 0 }
+        return
+      }
+      isLoading.value = true
+      error.value = null
+      try {
+        const responses = await Promise.all(
+          accessible.map((c) =>
+            ZonesService.getAll({
+              page: 1,
+              limit: FANOUT_LIMIT_PER_COMMERCE,
+              commerceId: c.commerceId,
+              isActive: params.isActive,
+            }),
+          ),
+        )
+        const merged = responses.flatMap((r) => r.data)
+        zones.value = merged
+        // No hay paginación coherente al fanear out; dejamos el total con
+        // el agregado y limit con el conteo real para que la UI muestre
+        // "X zonas" sin sugerir páginas adicionales.
+        pagination.value = { page: 1, limit: merged.length, total: merged.length }
+      } catch (e) {
+        error.value = humanizeAuthError(e)
+      } finally {
+        isLoading.value = false
+      }
+      return
+    }
+
+    // Commerce específico — privadas scoped al tenant.
     isLoading.value = true
     error.value = null
     try {
@@ -65,9 +146,7 @@ export const useZonesStore = defineStore('zones', () => {
         page: params.page ?? pagination.value.page,
         limit: params.limit ?? pagination.value.limit,
         isActive: params.isActive,
-        commerceId: viewMode.value === 'commerce'
-          ? selectedCommerceId.value ?? undefined
-          : undefined,
+        commerceId: cId,
       })
       zones.value = res.data
       pagination.value = { page: res.page, limit: res.limit, total: res.total }
@@ -111,7 +190,7 @@ export const useZonesStore = defineStore('zones', () => {
   // El backend solo acepta PATCH /commerce/:cId/zones/:zoneId. Resolvemos el
   // commerceId en este orden:
   //   1) el de la zona (cuando el listado lo incluye)
-  //   2) el commerce activo del store (cuando el listado venía con null —
+  //   2) el commerce activo del sidebar (cuando el listado venía con null —
   //      caso típico: zona global asignada al commerce, que aparece en el
   //      GET commerce-scoped con commerceId=null pese a vivir bajo ese cId)
   // Si tampoco hay activo, no podemos enrutar (típicamente vista Globales).
@@ -120,7 +199,7 @@ export const useZonesStore = defineStore('zones', () => {
     zoneCommerceId: string | null,
     dto: UpdateZoneDto,
   ): Promise<Zone> {
-    const cId = zoneCommerceId ?? selectedCommerceId.value
+    const cId = zoneCommerceId ?? activeCommerceId.value
     if (!cId) {
       throw new Error('No se puede editar una zona sin commerce dueño')
     }
@@ -170,20 +249,22 @@ export const useZonesStore = defineStore('zones', () => {
     viewMode.value = mode
   }
 
-  function setSelectedCommerce(commerceId: string | null): void {
-    selectedCommerceId.value = commerceId
-  }
-
-  function setAvailableCommerces(list: CommerceRef[]): void {
-    availableCommerces.value = list
-  }
-
   function setSearch(value: string): void {
     search.value = value
   }
 
-  // Auto-recarga al cambiar de vista o de commerce activo.
-  watch([viewMode, selectedCommerceId], async () => {
+  // Cambio de pestaña → recargar (las dos vistas tienen datasets distintos).
+  watch(viewMode, async () => {
+    search.value = ''
+    selectedZone.value = null
+    pagination.value = { page: 1, limit: 20, total: 0 }
+    await fetchZones({ page: 1 })
+  })
+
+  // Cambio de commerce activo → recargar SOLO si estamos en pestaña 'commerce'.
+  // En 'global' las zonas son del sistema; no dependen del sidebar.
+  watch(activeCommerceId, async () => {
+    if (viewMode.value === 'global') return
     search.value = ''
     selectedZone.value = null
     pagination.value = { page: 1, limit: 20, total: 0 }
@@ -191,9 +272,8 @@ export const useZonesStore = defineStore('zones', () => {
   })
 
   return {
+    activeCommerceId,
     viewMode,
-    selectedCommerceId,
-    availableCommerces,
     zones,
     selectedZone,
     pagination,
@@ -211,8 +291,6 @@ export const useZonesStore = defineStore('zones', () => {
     updateZone,
     copyZone,
     setViewMode,
-    setSelectedCommerce,
-    setAvailableCommerces,
     setSearch,
   }
 })
