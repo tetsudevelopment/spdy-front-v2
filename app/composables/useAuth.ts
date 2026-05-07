@@ -1,5 +1,9 @@
 import { computed } from 'vue'
 import { useAuthStore, type AuthUser } from '~/stores/auth.store'
+import {
+  syncActiveCommerceWithAuth,
+  useActiveCommerceStore,
+} from '~/stores/active-commerce.store'
 import { humanizeAuthError } from '~/utils/error.utils'
 
 const REFRESH_TOKEN_KEY = 'spdy.refreshToken'
@@ -128,6 +132,7 @@ export function useAuth() {
         },
       })
       store.setUser(me)
+      await syncActiveCommerceWithAuth()
     } catch {
       // No bloquear login por error en /users/me; se recarga más tarde.
     }
@@ -163,6 +168,7 @@ export function useAuth() {
     try {
       const me = await request<MeResponse>('/users/me')
       store.setUser(me)
+      await syncActiveCommerceWithAuth()
     } catch {
       // la sesión ya fue limpiada por el interceptor si era 401
     }
@@ -192,6 +198,7 @@ export function useAuth() {
       // Pinia setup-stores no auto-generan $reset(), así que el camino más
       // confiable es iniciar el siguiente ciclo de la app desde cero.
       store.clear()
+      useActiveCommerceStore().clear()
       if (import.meta.client) {
         window.location.assign('/login')
       }
@@ -214,6 +221,7 @@ export function useAuth() {
       // ignore
     } finally {
       store.clear()
+      useActiveCommerceStore().clear()
       if (import.meta.client) {
         window.location.assign('/login')
       }

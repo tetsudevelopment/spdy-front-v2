@@ -1,10 +1,19 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
+import Select from 'primevue/select'
 import { useAuth } from '~/composables/useAuth'
 import { useMonitoringStore } from '~/modules/monitoring/store/monitoring.store'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 
 import type { Role } from '~/stores/auth.store'
+
+const ALL_COMMERCES_VALUE = '__all__' as const
+
+interface CommerceOption {
+  label: string
+  value: string
+}
 
 interface NavItem {
   label: string
@@ -80,6 +89,43 @@ const allSections: NavSection[] = [
 const route = useRoute()
 const { user, logout } = useAuth()
 const monitoringStore = useMonitoringStore()
+const activeCommerceStore = useActiveCommerceStore()
+
+// Visible solo si el rol puede operar sobre commerces (SA siempre, los demás
+// si tienen al menos uno asignado). Para Rider/Supervisor/PointSaleUser no
+// tiene sentido mostrar el selector.
+const showCommerceSelector = computed<boolean>(() => {
+  const role = user.value?.role
+  if (!role) return false
+  if (role === 'SuperAdmin') return true
+  return activeCommerceStore.accessibleCommerces.length > 0
+})
+
+const commerceOptions = computed<CommerceOption[]>(() => {
+  const sorted = [...activeCommerceStore.accessibleCommerces].sort((a, b) =>
+    a.commerceName.localeCompare(b.commerceName, 'es'),
+  )
+  const list: CommerceOption[] = sorted.map((c) => ({
+    label: c.commerceName,
+    value: c.commerceId,
+  }))
+  // Solo SA tiene la opción "Todos los comercios".
+  if (user.value?.role === 'SuperAdmin') {
+    return [{ label: 'Todos los comercios', value: ALL_COMMERCES_VALUE }, ...list]
+  }
+  return list
+})
+
+// Usamos un sentinel string ('__all__') como valor del item "Todos" para
+// evitar la fricción de PrimeVue Select con `null` como option-value (no
+// renderiza el item como seleccionado cuando coincide con el placeholder).
+const commerceModelValue = computed<string>(() =>
+  activeCommerceStore.activeCommerceId ?? ALL_COMMERCES_VALUE,
+)
+
+function onCommerceChange(value: string): void {
+  activeCommerceStore.setActiveCommerce(value === ALL_COMMERCES_VALUE ? null : value)
+}
 
 const activeServicesBadge = computed<number | null>(() => {
   const kpi = monitoringStore.kpis.find((k) => k.key === 'active_services')
@@ -134,6 +180,22 @@ function isActive(to: string): boolean {
           <span class="sidebar__logo-title">SPDY</span>
           <span class="sidebar__logo-subtitle">Monitoreo operacional</span>
         </div>
+      </div>
+
+      <div v-if="showCommerceSelector" class="sidebar__commerce">
+        <div class="sidebar__section-title">Comercio activo</div>
+        <Select
+          :model-value="commerceModelValue"
+          :options="commerceOptions"
+          option-label="label"
+          option-value="value"
+          :disabled="activeCommerceStore.isLocked"
+          placeholder="Seleccioná un comercio"
+          class="sidebar__commerce-select"
+          :show-clear="false"
+          append-to="self"
+          @update:model-value="onCommerceChange"
+        />
       </div>
 
       <nav class="sidebar__nav">
@@ -252,6 +314,74 @@ function isActive(to: string): boolean {
   color: var(--color-muted);
   text-transform: uppercase;
   letter-spacing: 0.6px;
+}
+
+.sidebar__commerce {
+  padding: 0 0 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.sidebar__commerce-select {
+  width: 100%;
+}
+
+/* Anclamos el panel del Select al propio container (`append-to="self"`) y
+   le forzamos contraste contra el sidebar (#262625) — el preset Aura no
+   garantiza el match cromático en sidebars custom. */
+.sidebar__commerce-select :deep(.p-select) {
+  width: 100%;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 13px;
+  border-radius: 8px;
+}
+
+.sidebar__commerce-select :deep(.p-select:not(.p-disabled):hover) {
+  border-color: color-mix(in srgb, var(--color-brand) 50%, var(--color-border));
+}
+
+.sidebar__commerce-select :deep(.p-select.p-focus) {
+  border-color: var(--color-brand);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-brand) 25%, transparent);
+}
+
+.sidebar__commerce-select :deep(.p-select-label) {
+  color: var(--color-text);
+  padding: 8px 10px;
+}
+
+.sidebar__commerce-select :deep(.p-select-dropdown) {
+  color: var(--color-muted);
+}
+
+.sidebar__commerce-select :deep(.p-select.p-disabled) {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.sidebar__commerce-select :deep(.p-select-overlay) {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  margin-top: 4px;
+  z-index: 50;
+}
+
+.sidebar__commerce-select :deep(.p-select-option) {
+  color: var(--color-text);
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.sidebar__commerce-select :deep(.p-select-option:hover) {
+  background: #2e2e2d;
+}
+
+.sidebar__commerce-select :deep(.p-select-option.p-select-option-selected) {
+  background: color-mix(in srgb, var(--color-brand) 14%, transparent);
+  color: var(--color-brand);
 }
 
 .sidebar__nav {
