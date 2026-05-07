@@ -4,6 +4,7 @@ import Dialog from 'primevue/dialog'
 import MultiSelect from 'primevue/multiselect'
 import Button from 'primevue/button'
 import { useAuth } from '~/composables/useAuth'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { useRidersStore } from '../store/riders.store'
 import { RidersService } from '../services/riders.service'
 import { humanizeAuthError } from '~/utils/error.utils'
@@ -21,16 +22,17 @@ const emit = defineEmits<{
 }>()
 
 const store = useRidersStore()
+const activeCommerceStore = useActiveCommerceStore()
 const { user: authUser } = useAuth()
 
 const isSuperAdmin = computed<boolean>(() => authUser.value?.role === 'SuperAdmin')
 const isGlobalRider = computed<boolean>(() => props.rider?.fleetType === 'Global')
 
 // Map commerceId → nombre, para etiquetar zonas privadas en el dropdown.
-// Se nutre de los commerces accesibles que el riders page ya puebla en mount.
+// Lo nutre la lista de commerces accesibles del usuario actual.
 const commerceNameById = computed<Map<string, string>>(() => {
   const m = new Map<string, string>()
-  for (const c of store.availableCommerces) m.set(c.commerceId, c.commerceName)
+  for (const c of activeCommerceStore.accessibleCommerces) m.set(c.commerceId, c.commerceName)
   return m
 })
 
@@ -74,15 +76,15 @@ async function loadZones(): Promise<void> {
       // Globales del sistema + privadas de cada commerce accesible. Sin un
       // endpoint agregado en el backend, abanicamos en paralelo.
       tasks.push(RidersService.listGlobalZones())
-      for (const c of store.availableCommerces) {
+      for (const c of activeCommerceStore.accessibleCommerces) {
         tasks.push(RidersService.listZonesForCommerce(c.commerceId))
       }
     } else {
       // Privado: commerce dueño. Global + CommerceAdmin: commerce del actor
-      // (selectedCommerceId). Si el dueño no viene, caemos al activo.
+      // (activeCommerceId). Si el dueño no viene, caemos al activo.
       const ownerCommerceId = props.rider?.fleetType === 'Privada'
-        ? (props.rider.commerceId ?? store.selectedCommerceId)
-        : store.selectedCommerceId
+        ? (props.rider.commerceId ?? activeCommerceStore.activeCommerceId)
+        : activeCommerceStore.activeCommerceId
       if (ownerCommerceId) {
         tasks.push(RidersService.listZonesForCommerce(ownerCommerceId))
       }
@@ -147,12 +149,12 @@ async function removeAssigned(zoneId: string): Promise<void> {
   submitError.value = null
   try {
     if (props.rider.fleetType === 'Privada') {
-      const cId = props.rider.commerceId ?? store.selectedCommerceId
+      const cId = props.rider.commerceId ?? activeCommerceStore.activeCommerceId
       if (!cId) return
       await RidersService.removeZone(cId, props.rider.id, zoneId)
     } else {
       const zone = availableZones.value.find((z) => z.id === zoneId)
-      const owner = zone ? zone.commerceId : (store.selectedCommerceId ?? null)
+      const owner = zone ? zone.commerceId : (activeCommerceStore.activeCommerceId ?? null)
       if (owner === null) {
         await RidersService.removeGlobalZone(props.rider.id, zoneId)
       } else {

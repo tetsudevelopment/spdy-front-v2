@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
+import { useAuthStore } from '~/stores/auth.store'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { humanizeAuthError } from '~/utils/error.utils'
 import { RidersService } from '../services/riders.service'
 import type {
@@ -18,26 +20,31 @@ import type {
 // Pareja mínima para enrutar adds/removes de zonas a su commerce dueño.
 type ZoneOwner = Pick<ZoneSummary, 'id' | 'commerceId'>
 
-interface CommerceRef {
-  commerceId: string
-  commerceName: string
-}
-
 interface Pagination {
   page: number
   limit: number
   total: number
 }
 
-// 'commerce' = riders del commerce seleccionado (privados + globales relevantes,
-//              tal como los devuelve GET /commerce/:cId/riders).
-// 'global'   = vista exclusiva de SuperAdmin: TODOS los riders del sistema
-//              vía GET /riders.
+// 'commerce' = vista alineada al sidebar (selector de comercio activo):
+//                - activeCommerceId === uuid → riders del commerce
+//                  (privados + globales relevantes, vía /commerce/:cId/riders)
+//                - activeCommerceId === null → SA only ("Todos los comercios"):
+//                  TODOS los riders del sistema (privados + globales) vía /riders
+// 'global'   = vista exclusiva de SuperAdmin: SOLO los riders Globales del
+//              sistema. Ignora el sidebar; filtra client-side sobre /riders
+//              hasta que exista endpoint dedicado.
 export type RidersViewMode = 'commerce' | 'global'
 
 export const useRidersStore = defineStore('riders', () => {
-  const selectedCommerceId = ref<string | null>(null)
-  const availableCommerces = ref<CommerceRef[]>([])
+  const activeCommerceStore = useActiveCommerceStore()
+  const authStore = useAuthStore()
+
+  // Reactive shortcut al commerce activo del sidebar — el watcher de abajo
+  // dispara recargas cuando cambia. La lista accesible (para selectores
+  // dentro del módulo) la leen directamente del activeCommerceStore.
+  const activeCommerceId = computed<string | null>(() => activeCommerceStore.activeCommerceId)
+
   const viewMode = ref<RidersViewMode>('commerce')
 
   const riders = ref<Rider[]>([])
@@ -99,34 +106,63 @@ export const useRidersStore = defineStore('riders', () => {
     () => riders.value.filter((r) => !r.currentStatus || r.currentStatus === 'offline').length,
   )
 
-  async function fetchRiders(params: ListRidersParams = {}): Promise<void> {
-    if (viewMode.value === 'global') {
-      isLoading.value = true
-      error.value = null
-      try {
-        const res = await RidersService.getAllGlobal({
-          page: params.page ?? pagination.value.page,
-          limit: params.limit ?? pagination.value.limit,
-        })
-        riders.value = res.data
-        pagination.value = { page: res.page, limit: res.limit, total: res.total }
-      } catch (e) {
-        error.value = humanizeAuthError(e)
-      } finally {
-        isLoading.value = false
-      }
-      return
-    }
-
-    if (!selectedCommerceId.value) {
-      riders.value = []
-      pagination.value = { page: 1, limit: 20, total: 0 }
-      return
-    }
+  // Helper: pega contra /riders y actualiza state. Lo extraemos porque tanto
+  // `viewMode='global'` (filtrando) como `viewMode='commerce' + activeCommerceId=null`
+  // (sin filtrar) lo usan.
+  async function fetchSystemWide(
+    params: ListRidersParams,
+    onlyGlobals: boolean,
+  ): Promise<void> {
     isLoading.value = true
     error.value = null
     try {
-      const res = await RidersService.getAll(selectedCommerceId.value, {
+      const res = await RidersService.getAllGlobal({
+        page: params.page ?? pagination.value.page,
+        limit: params.limit ?? pagination.value.limit,
+      })
+      riders.value = onlyGlobals
+        ? res.data.filter((r) => r.fleetType === 'Global')
+        : res.data
+      // Nota: `total` viene del backend sobre el listado completo de /riders.
+      // Cuando filtramos a Globales, el contador queda inflado — aceptable
+      // hasta que el backend exponga un endpoint específico de globales.
+      pagination.value = { page: res.page, limit: res.limit, total: res.total }
+    } catch (e) {
+      error.value = humanizeAuthError(e)
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function fetchRiders(params: ListRidersParams = {}): Promise<void> {
+    if (viewMode.value === 'global') {
+      // Vista 'Global': SOLO riders Globales del sistema.
+      await fetchSystemWide(params, true)
+      return
+    }
+
+    // Vista 'commerce' — alineada al sidebar.
+    const cId = activeCommerceId.value
+
+    if (cId === null) {
+      // "Todos los comercios": SA ve TODOS los riders (privados + globales).
+      // CommerceAdmin sin commerces asignados también puede caer aquí por
+      // edge-case (initFromAuth lo deja en null). En ese caso vacío, el
+      // sidebar ya escondió el selector.
+      if (authStore.user?.role !== 'SuperAdmin') {
+        riders.value = []
+        pagination.value = { page: 1, limit: 20, total: 0 }
+        return
+      }
+      await fetchSystemWide(params, false)
+      return
+    }
+
+    // Commerce específico — scoped al tenant.
+    isLoading.value = true
+    error.value = null
+    try {
+      const res = await RidersService.getAll(cId, {
         page: params.page ?? pagination.value.page,
         limit: params.limit ?? pagination.value.limit,
       })
@@ -157,7 +193,7 @@ export const useRidersStore = defineStore('riders', () => {
     try {
       const inMemory = riders.value.find((r) => r.id === riderId)
       const fleet = options.fleetType ?? inMemory?.fleetType
-      const ownerCommerceId = options.commerceId ?? inMemory?.commerceId ?? selectedCommerceId.value
+      const ownerCommerceId = options.commerceId ?? inMemory?.commerceId ?? activeCommerceId.value
 
       let fetched: Rider
       if (fleet === 'Global') {
@@ -191,9 +227,8 @@ export const useRidersStore = defineStore('riders', () => {
   }
 
   // Carga los IDs de zonas accesibles para el actor (su commerce). Se llama
-  // solo para CommerceAdmin desde la página de riders al montar — SuperAdmin
-  // ve todo y no requiere este filtro. Idempotente: re-llamar sobreescribe
-  // el set sin duplicaciones (Set lo garantiza).
+  // solo para CommerceAdmin desde la página de riders al montar y al cambiar
+  // el commerce activo — SA ve todo y no requiere este filtro. Idempotente.
   async function loadActorAccessibleZoneIds(commerceId: string): Promise<void> {
     try {
       const zones = await RidersService.listZonesForCommerce(commerceId)
@@ -210,13 +245,13 @@ export const useRidersStore = defineStore('riders', () => {
   }
 
   // Crear rider Privado: bajo /commerce/:cId/riders. Si llaman sin
-  // `targetCommerceId`, se usa el commerce seleccionado en el store.
+  // `targetCommerceId`, se usa el commerce activo del sidebar.
   async function createRider(
     dto: CreateRiderDto,
     photo?: File | null,
     targetCommerceId?: string,
   ): Promise<Rider> {
-    const commerceId = targetCommerceId ?? selectedCommerceId.value
+    const commerceId = targetCommerceId ?? activeCommerceId.value
     if (!commerceId) throw new Error('No hay comercio seleccionado')
     isCreating.value = true
     error.value = null
@@ -269,7 +304,7 @@ export const useRidersStore = defineStore('riders', () => {
       if (target?.fleetType === 'Global') {
         updated = await RidersService.updateGlobal(riderId, dto)
       } else {
-        const cId = target?.commerceId ?? selectedCommerceId.value
+        const cId = target?.commerceId ?? activeCommerceId.value
         if (!cId) throw new Error('No hay comercio asociado al domiciliario')
         updated = await RidersService.update(cId, riderId, dto)
       }
@@ -294,7 +329,7 @@ export const useRidersStore = defineStore('riders', () => {
       if (target?.fleetType === 'Global') {
         updated = await RidersService.updateGlobalPhoto(riderId, file)
       } else {
-        const cId = target?.commerceId ?? selectedCommerceId.value
+        const cId = target?.commerceId ?? activeCommerceId.value
         if (!cId) throw new Error('No hay comercio asociado al domiciliario')
         updated = await RidersService.updatePhoto(cId, riderId, file)
       }
@@ -317,7 +352,7 @@ export const useRidersStore = defineStore('riders', () => {
     const target = resolveRider(riderId)
     // Documentos siguen siendo commerce-scoped en el backend. Para un Global
     // usamos el commerce activo (el actor está operando en un contexto).
-    const cId = target?.commerceId ?? selectedCommerceId.value
+    const cId = target?.commerceId ?? activeCommerceId.value
     if (!cId) throw new Error('No hay comercio seleccionado')
     error.value = null
     try {
@@ -358,7 +393,7 @@ export const useRidersStore = defineStore('riders', () => {
 
     try {
       if (target.fleetType === 'Privada') {
-        const cId = target.commerceId ?? selectedCommerceId.value
+        const cId = target.commerceId ?? activeCommerceId.value
         if (!cId) throw new Error('No hay comercio seleccionado')
         if (toAdd.length > 0) {
           await RidersService.assignZones(cId, riderId, toAdd)
@@ -369,10 +404,10 @@ export const useRidersStore = defineStore('riders', () => {
       } else {
         // Global: agrupar adds/removes por owner. Si una zona no está en el
         // catálogo (caso raro: assigned pero ya inactiva o fuera del scope),
-        // caemos al commerce del actor — mismo que el viejo bug, pero acotado.
+        // caemos al commerce activo del actor.
         const ownerById = new Map<string, string | null>()
         for (const z of zoneCatalog) ownerById.set(z.id, z.commerceId)
-        const fallback = selectedCommerceId.value
+        const fallback = activeCommerceId.value
 
         const ownerOf = (zoneId: string): string | null => {
           if (ownerById.has(zoneId)) return ownerById.get(zoneId) ?? null
@@ -435,7 +470,7 @@ export const useRidersStore = defineStore('riders', () => {
       if (target?.fleetType === 'Global') {
         await RidersService.resetGlobalRiderPassword(riderId, newPassword)
       } else {
-        const cId = target?.commerceId ?? selectedCommerceId.value
+        const cId = target?.commerceId ?? activeCommerceId.value
         if (!cId) throw new Error('No hay comercio asociado al domiciliario')
         await RidersService.resetPassword(cId, riderId, newPassword)
       }
@@ -459,11 +494,15 @@ export const useRidersStore = defineStore('riders', () => {
     if (previous === next) return
 
     // El endpoint de availability es commerce-scoped. Para Privados usamos su
-    // commerce dueño; para Globales, el commerce activo (selectedCommerceId).
+    // commerce dueño; para Globales, el commerce activo. Si el actor está en
+    // "Todos los comercios" (activeCommerceId=null) y el rider es Global, no
+    // podemos rutear — pedimos seleccionar un commerce.
     const cId = original.fleetType === 'Global'
-      ? selectedCommerceId.value
-      : (original.commerceId ?? selectedCommerceId.value)
-    if (!cId) throw new Error('No hay comercio seleccionado')
+      ? activeCommerceId.value
+      : (original.commerceId ?? activeCommerceId.value)
+    if (!cId) {
+      throw new Error('Selecciona un comercio en el sidebar para gestionar la disponibilidad de un rider global')
+    }
 
     // Optimistic mutation — objeto nuevo para que Vue detecte el cambio.
     const optimistic: Rider = { ...original, availability: next }
@@ -489,14 +528,6 @@ export const useRidersStore = defineStore('riders', () => {
     }
   }
 
-  function setSelectedCommerce(commerceId: string | null): void {
-    selectedCommerceId.value = commerceId
-  }
-
-  function setAvailableCommerces(list: CommerceRef[]): void {
-    availableCommerces.value = list
-  }
-
   async function setViewMode(mode: RidersViewMode): Promise<void> {
     if (viewMode.value === mode) return
     viewMode.value = mode
@@ -505,13 +536,7 @@ export const useRidersStore = defineStore('riders', () => {
     search.value = ''
     availabilityFilter.value = null
     statusFilter.value = null
-    if (mode === 'global') {
-      await fetchRiders({ page: 1 })
-    } else if (selectedCommerceId.value) {
-      await fetchRiders({ page: 1 })
-    } else {
-      riders.value = []
-    }
+    await fetchRiders({ page: 1 })
   }
 
   function setSearch(value: string): void {
@@ -526,22 +551,20 @@ export const useRidersStore = defineStore('riders', () => {
     statusFilter.value = value
   }
 
-  watch(selectedCommerceId, async (id) => {
-    // Solo recargamos cuando estamos en vista por commerce. En vista global
-    // ignoramos el cambio de commerce — el listado es a nivel sistema.
+  // Cuando el usuario cambia el commerce en el sidebar, re-disparamos el
+  // listado. La vista 'global' ignora el sidebar (es a nivel sistema).
+  watch(activeCommerceId, async () => {
     if (viewMode.value === 'global') return
     search.value = ''
     availabilityFilter.value = null
     statusFilter.value = null
     selectedRider.value = null
     pagination.value = { page: 1, limit: 20, total: 0 }
-    if (id) await fetchRiders({ page: 1 })
-    else riders.value = []
+    await fetchRiders({ page: 1 })
   })
 
   return {
-    selectedCommerceId,
-    availableCommerces,
+    activeCommerceId,
     viewMode,
     riders,
     selectedRider,
@@ -569,8 +592,6 @@ export const useRidersStore = defineStore('riders', () => {
     assignZones,
     toggleAvailability,
     resetPassword,
-    setSelectedCommerce,
-    setAvailableCommerces,
     setViewMode,
     setSearch,
     setAvailabilityFilter,

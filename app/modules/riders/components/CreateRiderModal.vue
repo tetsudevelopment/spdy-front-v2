@@ -7,6 +7,7 @@ import Select from 'primevue/select'
 import Button from 'primevue/button'
 import { useAppToast } from '~/composables/useToast'
 import { useAuth } from '~/composables/useAuth'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { useRidersStore } from '../store/riders.store'
 import type {
   CreateRiderDto,
@@ -35,6 +36,7 @@ const emit = defineEmits<{
 }>()
 
 const store = useRidersStore()
+const activeCommerceStore = useActiveCommerceStore()
 const toast = useAppToast()
 const { user: authUser } = useAuth()
 
@@ -50,7 +52,7 @@ const showRiderTypeSelector = computed<boolean>(() => {
 })
 const isGlobalMode = computed<boolean>(() => !isEditMode.value && selectedType.value === 'global')
 // SA + creación de Privado puede elegir commerce destino. CA usa siempre el
-// suyo (= store.selectedCommerceId), por eso ni ve este campo.
+// suyo (= activeCommerceStore.activeCommerceId), por eso ni ve este campo.
 const showCommerceSelector = computed<boolean>(() => {
   return !isEditMode.value && selectedType.value === 'private' && isSuperAdmin.value
 })
@@ -111,9 +113,10 @@ function emptyForm(): FormState {
     cedula: '',
     vehicleType: null,
     licensePlate: '',
-    // Pre-llenamos con el commerce activo del store cuando lo hay; el SA puede
-    // cambiarlo desde el dropdown del modal antes de enviar.
-    targetCommerceId: store.selectedCommerceId,
+    // Prellenamos con el commerce activo del sidebar cuando lo hay; en
+    // "Todos los comercios" (activeCommerceId === null) queda vacío y el SA
+    // debe elegir uno del dropdown antes de enviar (validación abajo).
+    targetCommerceId: activeCommerceStore.activeCommerceId,
   }
 }
 
@@ -499,7 +502,7 @@ async function handleUpdate(data: z.infer<typeof updateSchema>): Promise<void> {
           <label class="field__label">Comercio destino <span class="field__req">*</span></label>
           <Select
             v-model="form.targetCommerceId"
-            :options="[...store.availableCommerces]"
+            :options="[...activeCommerceStore.accessibleCommerces]"
             option-label="commerceName"
             option-value="commerceId"
             placeholder="Selecciona un comercio"

@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, watch } from 'vue'
+import { ref } from 'vue'
 import InputText from 'primevue/inputtext'
 import Select from 'primevue/select'
 import Button from 'primevue/button'
 import Toast from 'primevue/toast'
 import { useAuth } from '~/composables/useAuth'
 import { useAppToast } from '~/composables/useToast'
-import { useCommerceStore } from '~/modules/commerce/store/commerce.store'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { useRidersStore, type RidersViewMode } from '~/modules/riders/store/riders.store'
 import RidersTable from '~/modules/riders/components/RidersTable.vue'
 import CreateRiderModal from '~/modules/riders/components/CreateRiderModal.vue'
@@ -23,14 +24,9 @@ definePageMeta({
   allowedRoles: ['SuperAdmin', 'CommerceAdmin'],
 })
 
-interface CommerceOption {
-  commerceId: string
-  commerceName: string
-}
-
 const { user: authUser } = useAuth()
 const toast = useAppToast()
-const commerceStore = useCommerceStore()
+const activeCommerceStore = useActiveCommerceStore()
 const ridersStore = useRidersStore()
 
 const isSuperAdmin = computed<boolean>(() => authUser.value?.role === 'SuperAdmin')
@@ -42,20 +38,17 @@ const editingRider = ref<Rider | null>(null)
 const detailRider = ref<Rider | null>(null)
 const zonesRider = ref<Rider | null>(null)
 
-const showCommerceSelector = computed<boolean>(() => {
-  if (ridersStore.viewMode === 'global') return false
-  return isSuperAdmin.value || ridersStore.availableCommerces.length > 1
-})
-
 const isGlobalView = computed<boolean>(() => ridersStore.viewMode === 'global')
 
-const hasCommerceSelected = computed<boolean>(
-  () => ridersStore.selectedCommerceId !== null,
-)
-
-// En vista global no exigimos commerce seleccionado para listar.
+// `canShowList` decide si rendereamos KPIs/tabla o un empty state previo.
+//  - vista 'global': siempre, listado a nivel sistema.
+//  - vista 'commerce' + activeCommerceId === uuid: siempre.
+//  - vista 'commerce' + null: solo SA (verá "Todos los comercios"). Para CA
+//    sin commerces accesibles esto queda en false → empty state dedicado.
 const canShowList = computed<boolean>(() => {
-  return isGlobalView.value || hasCommerceSelected.value
+  if (isGlobalView.value) return true
+  if (activeCommerceStore.activeCommerceId !== null) return true
+  return isSuperAdmin.value
 })
 
 const noRiders = computed<boolean>(() => {
@@ -85,50 +78,33 @@ const STATUS_OPTIONS: ReadonlyArray<{ label: string; value: RiderStatus | null }
   { label: 'Offline', value: 'offline' },
 ]
 
-async function loadCommerces(): Promise<void> {
+// Para CA, los IDs de zonas accesibles del actor se usan en AssignRiderZonesModal
+// para filtrar zonas de OTROS commerces que un Rider Global tenga asignadas. SA
+// no requiere este filtro.
+async function refreshActorAccessibleZones(): Promise<void> {
   if (isSuperAdmin.value) {
-    if (commerceStore.commerces.length === 0) {
-      await commerceStore.fetchCommerces()
-    }
-    const list: CommerceOption[] = commerceStore.commerces.map((c) => ({
-      commerceId: c.id,
-      commerceName: c.name,
-    }))
-    ridersStore.setAvailableCommerces(list)
-    // SA ve todo: limpiamos cualquier set previo para que no filtre.
     ridersStore.clearActorAccessibleZoneIds()
-  } else {
-    const assigned = authUser.value?.commerces ?? []
-    ridersStore.setAvailableCommerces([...assigned])
-    // CA: cargamos los IDs de zonas accesibles (privadas + globales asignadas
-    // a su commerce) para ocultar las zonas de otros commerces que un Rider
-    // Global tenga asignadas. El backend devuelve todas; filtramos en cliente.
-    const actorCommerceId = assigned[0]?.commerceId
-    if (actorCommerceId) {
-      await ridersStore.loadActorAccessibleZoneIds(actorCommerceId)
-    }
+    return
   }
-  if (!ridersStore.selectedCommerceId) {
-    const first = ridersStore.availableCommerces[0]
-    if (first) ridersStore.setSelectedCommerce(first.commerceId)
-  }
+  const cId = activeCommerceStore.activeCommerceId
+  if (cId) await ridersStore.loadActorAccessibleZoneIds(cId)
+  else ridersStore.clearActorAccessibleZoneIds()
 }
 
 onMounted(async () => {
-  await loadCommerces()
+  await refreshActorAccessibleZones()
+  await ridersStore.fetchRiders({ page: 1 })
 })
 
+// El watcher del store ya se encarga de re-fetchar la lista cuando cambia el
+// commerce activo. Acá solo refrescamos el set de zonas accesibles del actor
+// (CA con varios commerces asignados puede saltar entre ellos).
 watch(
-  () => authUser.value?.id,
+  () => activeCommerceStore.activeCommerceId,
   async () => {
-    ridersStore.setSelectedCommerce(null)
-    await loadCommerces()
+    await refreshActorAccessibleZones()
   },
 )
-
-function onCommerceChange(value: string | null): void {
-  ridersStore.setSelectedCommerce(value)
-}
 
 async function onViewModeChange(value: RidersViewMode | null): Promise<void> {
   // El SelectButton puede emitir null si el usuario clickea el botón ya activo
@@ -244,7 +220,7 @@ function onZonesSaved(): void {
           label="Nuevo domiciliario"
           icon="pi pi-plus"
           severity="primary"
-          :disabled="!isSuperAdmin && !hasCommerceSelected"
+          :disabled="!canShowList"
           @click="openCreate"
         />
       </div>
@@ -266,25 +242,13 @@ function onZonesSaved(): void {
     </div>
 
     <div class="riders-page__filters">
-      <Select
-        v-if="showCommerceSelector"
-        :model-value="ridersStore.selectedCommerceId"
-        :options="[...ridersStore.availableCommerces]"
-        option-label="commerceName"
-        option-value="commerceId"
-        placeholder="Selecciona un comercio"
-        class="filter-commerce"
-        :show-clear="false"
-        @update:model-value="onCommerceChange"
-      />
-
       <span class="search">
         <i class="pi pi-search search__icon" aria-hidden="true" />
         <InputText
           :model-value="ridersStore.search"
           placeholder="Buscar por nombre, cédula, teléfono o placa"
           class="search__input"
-          :disabled="!hasCommerceSelected"
+          :disabled="!canShowList"
           @update:model-value="onSearchInput"
         />
       </span>
@@ -297,7 +261,7 @@ function onZonesSaved(): void {
         placeholder="Disponibilidad"
         class="filter-slim"
         show-clear
-        :disabled="!hasCommerceSelected"
+        :disabled="!canShowList"
         @update:model-value="onAvailabilityFilterChange"
       />
 
@@ -309,7 +273,7 @@ function onZonesSaved(): void {
         placeholder="Estado"
         class="filter-slim"
         show-clear
-        :disabled="!hasCommerceSelected"
+        :disabled="!canShowList"
         @update:model-value="onStatusFilterChange"
       />
     </div>
@@ -318,16 +282,17 @@ function onZonesSaved(): void {
 
     <div v-if="!canShowList" class="empty">
       <i class="pi pi-building empty__icon" aria-hidden="true" />
-      <h2 class="empty__title">Selecciona un comercio</h2>
+      <h2 class="empty__title">Sin comercios accesibles</h2>
       <p class="empty__hint">
-        Elige un comercio para ver y gestionar su flota de domiciliarios.
+        Tu cuenta no tiene comercios asignados. Pedí al SuperAdmin que te
+        habilite acceso a uno.
       </p>
     </div>
 
     <div v-else-if="noRiders" class="empty">
       <i class="pi pi-user empty__icon" aria-hidden="true" />
       <h2 class="empty__title">
-        {{ isGlobalView ? 'No hay domiciliarios en el sistema' : 'Este comercio aún no tiene domiciliarios' }}
+        {{ isGlobalView ? 'No hay domiciliarios globales en el sistema' : 'No hay domiciliarios para mostrar' }}
       </h2>
       <p class="empty__hint">
         Crea el primero para empezar a operar entregas.
@@ -474,10 +439,6 @@ function onZonesSaved(): void {
   gap: 12px;
   align-items: center;
   flex-wrap: wrap;
-}
-
-.filter-commerce {
-  min-width: 240px;
 }
 
 .filter-slim {
