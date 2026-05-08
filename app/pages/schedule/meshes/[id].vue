@@ -49,15 +49,17 @@ const isDraft = computed<boolean>(() => mesh.value?.state === 'draft')
 const isPublished = computed<boolean>(() => mesh.value?.state === 'published')
 const isArchived = computed<boolean>(() => mesh.value?.state === 'archived')
 
-// La grilla queda read-only cuando la malla NO está en draft. Esto cubre
-// tanto archivada (histórico inmutable) como publicada (operativa, sus
-// turnos están vivos en la calle — la única forma de modificar es clonar a
-// la próxima semana). El componente `ScheduleGrid` lee este flag para
-// deshabilitar clicks de chip y ocultar el "+ Añadir turno" inline.
-const isReadOnly = computed<boolean>(() => {
-  if (!mesh.value) return true
-  return !isDraft.value
-})
+// `isReadOnly` se construye con checks POSITIVOS sobre los estados que sí lo
+// son. La versión anterior (`!isDraft`) era funcionalmente equivalente pero
+// degeneraba a "todo lo que no sea draft": si el backend agrega un nuevo
+// estado en el futuro, o si `mesh.value?.state` queda en un valor caído
+// (undefined durante una carga rota, p.ej.), el grid quedaba bloqueado por
+// accidente. Acá nos blindamos: solo bloqueamos cuando realmente sabemos que
+// la malla está publicada o archivada. Como la grilla recién se monta dentro
+// de `<template v-else-if="mesh">`, no hace falta el guard de `!mesh.value`.
+const isReadOnly = computed<boolean>(
+  () => isPublished.value || isArchived.value,
+)
 
 const referencedTemplate = computed(() => {
   if (!mesh.value?.templateId) return null
