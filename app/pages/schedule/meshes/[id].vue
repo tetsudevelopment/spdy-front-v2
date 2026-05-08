@@ -45,9 +45,18 @@ const collapsedDays = ref<Set<DayOfWeek>>(new Set(DAYS))
 
 const mesh = computed(() => scheduleStore.currentMesh)
 
+const isDraft = computed<boolean>(() => mesh.value?.state === 'draft')
+const isPublished = computed<boolean>(() => mesh.value?.state === 'published')
+const isArchived = computed<boolean>(() => mesh.value?.state === 'archived')
+
+// La grilla queda read-only cuando la malla NO está en draft. Esto cubre
+// tanto archivada (histórico inmutable) como publicada (operativa, sus
+// turnos están vivos en la calle — la única forma de modificar es clonar a
+// la próxima semana). El componente `ScheduleGrid` lee este flag para
+// deshabilitar clicks de chip y ocultar el "+ Añadir turno" inline.
 const isReadOnly = computed<boolean>(() => {
   if (!mesh.value) return true
-  return mesh.value.state === 'archived'
+  return !isDraft.value
 })
 
 const referencedTemplate = computed(() => {
@@ -284,7 +293,7 @@ function goBack(): void {
 
         <div class="page__actions">
           <Button
-            v-if="mesh.state !== 'archived'"
+            v-if="isDraft"
             label="Añadir turno"
             icon="pi pi-plus"
             severity="secondary"
@@ -341,9 +350,13 @@ function goBack(): void {
         />
       </div>
 
-      <div v-if="isReadOnly" class="readonly-notice">
+      <div v-if="isArchived" class="readonly-notice">
         <i class="pi pi-lock" aria-hidden="true" />
         Esta malla está archivada. Es de solo lectura.
+      </div>
+      <div v-else-if="isPublished" class="readonly-notice readonly-notice--published">
+        <i class="pi pi-check-circle" aria-hidden="true" />
+        Esta malla está publicada. Para modificar turnos, cloná a la próxima semana.
       </div>
 
       <div class="page__scroll">
@@ -549,6 +562,14 @@ function goBack(): void {
   border-radius: 9px;
   font-size: 12px;
   font-weight: 600;
+}
+
+/* Variante para malla publicada — usa el color de marca para diferenciar
+   visualmente del estado archivado y comunicar "está vivo, no roto". */
+.readonly-notice--published {
+  background: color-mix(in srgb, var(--color-brand) 10%, transparent);
+  border-color: color-mix(in srgb, var(--color-brand) 35%, transparent);
+  color: var(--color-brand);
 }
 
 .page__scroll {

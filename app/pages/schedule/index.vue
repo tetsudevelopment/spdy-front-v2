@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import Select from 'primevue/select'
 import Button from 'primevue/button'
 import Toast from 'primevue/toast'
+import Dialog from 'primevue/dialog'
 import DataTable, { type DataTableRowClickEvent } from 'primevue/datatable'
 import Column from 'primevue/column'
 import { useAppToast } from '~/composables/useToast'
@@ -120,14 +121,37 @@ function openMeshDetail(mesh: ScheduledMeshListItem): void {
   router.push(`/schedule/meshes/${mesh.id}`)
 }
 
-async function onDeleteMesh(mesh: ScheduledMeshListItem, e: Event): Promise<void> {
+// State del diálogo de confirmación de eliminación. Reemplaza el `confirm()`
+// nativo para mantener el theming oscuro consistente y poder mostrar un
+// mensaje extra cuando la malla está publicada (turnos vivos en operación).
+const meshToDelete = ref<ScheduledMeshListItem | null>(null)
+const showDeleteMeshDialog = ref<boolean>(false)
+const isDeletingMesh = ref<boolean>(false)
+
+function onDeleteMesh(mesh: ScheduledMeshListItem, e: Event): void {
   e.stopPropagation()
-  if (!confirm(`¿Eliminar la malla "${mesh.name}"? Esta acción no se puede deshacer.`)) return
+  meshToDelete.value = mesh
+  showDeleteMeshDialog.value = true
+}
+
+function cancelDeleteMesh(): void {
+  if (isDeletingMesh.value) return
+  showDeleteMeshDialog.value = false
+  meshToDelete.value = null
+}
+
+async function confirmDeleteMesh(): Promise<void> {
+  if (!meshToDelete.value) return
+  isDeletingMesh.value = true
   try {
-    await scheduleStore.deleteMesh(mesh.id)
+    await scheduleStore.deleteMesh(meshToDelete.value.id)
     toast.success('Malla eliminada')
+    showDeleteMeshDialog.value = false
+    meshToDelete.value = null
   } catch (e) {
     toast.error(e instanceof Error ? e.message : 'No se pudo eliminar la malla')
+  } finally {
+    isDeletingMesh.value = false
   }
 }
 
@@ -381,6 +405,58 @@ function dayPreview(tpl: TemplateWithCommerce): string {
       v-model:visible="showMeshModal"
       @created="onMeshCreated"
     />
+
+    <Dialog
+      :visible="showDeleteMeshDialog"
+      modal
+      :closable="!isDeletingMesh"
+      :draggable="false"
+      :style="{ width: '460px' }"
+      header="Eliminar malla"
+      :pt="{
+        root: { style: 'background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px;' },
+        header: { style: 'background: var(--color-surface); color: var(--color-text); border-bottom: 1px solid var(--color-border);' },
+        content: { style: 'background: var(--color-surface); color: var(--color-text);' },
+        footer: { style: 'background: var(--color-surface); border-top: 1px solid var(--color-border);' },
+      }"
+      @update:visible="(v: boolean) => { if (!v) cancelDeleteMesh() }"
+    >
+      <div v-if="meshToDelete" class="confirm-delete">
+        <p class="confirm-delete__text">
+          ¿Seguro que querés eliminar la malla
+          <strong>"{{ meshToDelete.name }}"</strong>?
+          Esta acción no se puede deshacer.
+        </p>
+        <div
+          v-if="meshToDelete.state === 'published'"
+          class="confirm-delete__warning"
+        >
+          <i class="pi pi-exclamation-triangle" aria-hidden="true" />
+          <span>
+            Esta malla está publicada. Eliminarla afectará los turnos que
+            estén operativos.
+          </span>
+        </div>
+      </div>
+      <template #footer>
+        <div class="confirm-delete__footer">
+          <Button
+            label="Cancelar"
+            text
+            severity="secondary"
+            :disabled="isDeletingMesh"
+            @click="cancelDeleteMesh"
+          />
+          <Button
+            label="Eliminar"
+            icon="pi pi-trash"
+            severity="danger"
+            :loading="isDeletingMesh"
+            @click="confirmDeleteMesh"
+          />
+        </div>
+      </template>
+    </Dialog>
   </div>
 </template>
 
@@ -637,5 +713,50 @@ function dayPreview(tpl: TemplateWithCommerce): string {
   color: var(--color-warning);
   background: color-mix(in srgb, var(--color-warning) 15%, transparent);
   border-color: color-mix(in srgb, var(--color-warning) 40%, transparent);
+}
+
+/* Diálogo de confirmación de eliminación */
+.confirm-delete {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.confirm-delete__text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text);
+}
+
+.confirm-delete__text strong {
+  color: var(--color-text);
+  font-weight: 700;
+}
+
+.confirm-delete__warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 40%, transparent);
+  color: var(--color-warning);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.confirm-delete__warning i {
+  font-size: 13px;
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+
+.confirm-delete__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 </style>

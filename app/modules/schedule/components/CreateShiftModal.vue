@@ -50,12 +50,16 @@ const modalTitle = computed<string>(() =>
   isEditMode.value ? 'Editar turno' : 'Nuevo turno',
 )
 
-// El Select de día se oculta cuando el modal se abrió desde el botón
-// contextual "+ Añadir turno en {día}" (defaultDay presente) y no estamos
-// editando: el día queda implícito por el contexto. En creación desde topbar
-// o en edición, el usuario sí debe poder elegir/mover el día.
+// El Select de día se oculta siempre que el día venga determinado por el
+// contexto, evitando bugs de migración entre días:
+//   - Edición: el día queda fijo al del shift (cambiarlo desde un modal
+//     abierto en el contexto de un día expandido genera incoherencias).
+//   - Creación contextual ("+ Añadir turno en {día}"): el día está implícito
+//     por el botón que abrió el modal.
+// Solo se muestra en creación desde topbar (defaultDay null + create mode),
+// donde el usuario sí elige libremente.
 const hideDayField = computed<boolean>(
-  () => !isEditMode.value && props.defaultDay !== null,
+  () => isEditMode.value || props.defaultDay !== null,
 )
 const submitLabel = computed<string>(() =>
   isEditMode.value ? 'Guardar cambios' : 'Crear turno',
