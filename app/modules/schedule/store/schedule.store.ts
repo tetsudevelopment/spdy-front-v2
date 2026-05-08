@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
+import { useAuthStore } from '~/stores/auth.store'
+import { useActiveCommerceStore, type AccessibleCommerce } from '~/stores/active-commerce.store'
 import { humanizeAuthError } from '~/utils/error.utils'
 import { ScheduleService } from '../services/schedule.service'
 import { PdvService } from '~/modules/pdv/services/pdv.service'
@@ -26,11 +28,6 @@ import {
   type ZoneRef,
 } from '../types/schedule.types'
 
-interface CommerceRef {
-  commerceId: string
-  commerceName: string
-}
-
 // Template enriquecido con el nombre del commerce dueño — el dashboard lo
 // muestra como subtítulo cuando el usuario tiene varios commerces.
 export interface TemplateWithCommerce extends ScheduleTemplate {
@@ -38,11 +35,33 @@ export interface TemplateWithCommerce extends ScheduleTemplate {
 }
 
 export const useScheduleStore = defineStore('schedule', () => {
-  // Tenant / rol
-  const accessibleCommerces = ref<CommerceRef[]>([])
-  const isSuperAdmin = ref<boolean>(false)
+  const activeCommerceStore = useActiveCommerceStore()
+  const authStore = useAuthStore()
 
-  // Catálogos globales
+  // Reactive shortcuts a los datos del active commerce store. La lista
+  // accesible (todos los commerces del usuario) la usamos para deep-links —
+  // ej: cuando entrás a `/schedule/meshes/:id` y la malla pertenece a un
+  // commerce ≠ al activo del sidebar.
+  const activeCommerceId = computed<string | null>(() => activeCommerceStore.activeCommerceId)
+  const accessibleCommerces = computed<AccessibleCommerce[]>(
+    () => activeCommerceStore.accessibleCommerces,
+  )
+  const isSuperAdmin = computed<boolean>(() => authStore.user?.role === 'SuperAdmin')
+
+  // `scopedCommerces` es la lista a iterar para fetches de listado:
+  //   - activeCommerceId === uuid → solo ese commerce.
+  //   - activeCommerceId === null + SA → todos los accesibles ("Todos los comercios").
+  //   - activeCommerceId === null + non-SA → vacío (edge: CA sin commerces).
+  const scopedCommerces = computed<AccessibleCommerce[]>(() => {
+    const all = accessibleCommerces.value
+    const cId = activeCommerceId.value
+    if (cId === null) {
+      return isSuperAdmin.value ? all : []
+    }
+    return all.filter((c) => c.commerceId === cId)
+  })
+
+  // Catálogos globales (escalados al activo)
   const availableZones = ref<Zone[]>([])
   const riders = ref<Rider[]>([])
   const pdvs = ref<PointOfSale[]>([])
@@ -118,6 +137,14 @@ export const useScheduleStore = defineStore('schedule', () => {
     () => meshes.value.filter((m) => m.state === 'published').length,
   )
 
+  // Indica si hay un scope válido para listar mallas/templates/zonas.
+  // Útil para que la UI muestre un empty state distinto cuando un CA sin
+  // commerces accede a /schedule (caso degenerado).
+  const canQuery = computed<boolean>(() => {
+    if (activeCommerceId.value !== null) return true
+    return isSuperAdmin.value
+  })
+
   // Deduplica zonas por id — puede venir la misma zona global varias veces si
   // está asignada a >1 commerces del usuario.
   function dedupeZones(list: Zone[]): Zone[] {
@@ -126,12 +153,19 @@ export const useScheduleStore = defineStore('schedule', () => {
     return Array.from(seen.values())
   }
 
-  // Resuelve el commerceId que aloja la malla. El backend scope-a las mallas
-  // por commerce vía URL: si la zona es privada, el commerce es el dueño;
-  // si es global, fallback al primero accesible (el operador podrá luego
-  // mover/recrear si quiere otro tenant).
-  function resolveMeshCommerceId(zoneRef: ZoneRef): string | null {
+  // Resuelve el commerceId que aloja la malla según la zona elegida.
+  //   - Zona privada → siempre el commerce dueño de la zona (constraint del
+  //     backend; el endpoint vive bajo /commerce/:cId/scheduled-meshes).
+  //   - Zona global → el operador puede elegir destino vía el modal
+  //     (`targetCommerceId`); fallback al activo del sidebar; último fallback
+  //     al primer commerce accesible.
+  function resolveMeshCommerceId(
+    zoneRef: ZoneRef,
+    targetCommerceId?: string,
+  ): string | null {
     if (zoneRef.commerceId) return zoneRef.commerceId
+    if (targetCommerceId) return targetCommerceId
+    if (activeCommerceId.value) return activeCommerceId.value
     return accessibleCommerces.value[0]?.commerceId ?? null
   }
 
@@ -170,31 +204,36 @@ export const useScheduleStore = defineStore('schedule', () => {
     highlightedShiftIds.value = new Set()
   }
 
-  // ---------- Access / bootstrap ----------
-
-  function configureAccess(
-    opts: { isSuperAdmin: boolean; commerces: CommerceRef[] },
-  ): void {
-    isSuperAdmin.value = opts.isSuperAdmin
-    accessibleCommerces.value = opts.commerces
+  function resetState(): void {
+    meshes.value = []
+    templates.value = []
+    availableZones.value = []
+    riders.value = []
+    pdvs.value = []
+    zoneSummaries.value = []
+    currentMesh.value = null
+    currentTemplate.value = null
+    meshZoneFilter.value = null
+    meshStatusFilter.value = null
+    clearStructuredError()
   }
+
+  // ---------- Catálogos ----------
 
   async function fetchAvailableZones(): Promise<void> {
     error.value = null
     try {
       const collected: Zone[] = []
+      // Globales del sistema solo las trae SA — el endpoint /zones es SA-only.
+      // CA solo ve privadas de sus commerces (la zona global asignada al
+      // commerce aparece como privada en el listado commerce-scoped).
       if (isSuperAdmin.value) {
         const globals = await ZonesService.getAll({ page: 1, limit: 100 })
         collected.push(...globals.data)
-        for (const c of accessibleCommerces.value) {
-          const res = await ZonesService.getAll({ page: 1, limit: 100, commerceId: c.commerceId })
-          collected.push(...res.data)
-        }
-      } else {
-        for (const c of accessibleCommerces.value) {
-          const res = await ZonesService.getAll({ page: 1, limit: 100, commerceId: c.commerceId })
-          collected.push(...res.data)
-        }
+      }
+      for (const c of scopedCommerces.value) {
+        const res = await ZonesService.getAll({ page: 1, limit: 100, commerceId: c.commerceId })
+        collected.push(...res.data)
       }
       availableZones.value = dedupeZones(collected).filter((z) => z.isActive)
     } catch (e) {
@@ -228,8 +267,10 @@ export const useScheduleStore = defineStore('schedule', () => {
 
   // ---------- Templates ----------
 
+  // Lista templates de los commerces del scope. SA en "Todos" trae los de
+  // todos los commerces; SA con uno seleccionado o CA traen los del activo.
   async function fetchAllTemplates(): Promise<void> {
-    if (accessibleCommerces.value.length === 0) {
+    if (scopedCommerces.value.length === 0) {
       templates.value = []
       return
     }
@@ -237,7 +278,7 @@ export const useScheduleStore = defineStore('schedule', () => {
     error.value = null
     try {
       const all: TemplateWithCommerce[] = []
-      for (const c of accessibleCommerces.value) {
+      for (const c of scopedCommerces.value) {
         const list = await ScheduleService.listTemplates(c.commerceId)
         for (const t of list) {
           all.push({ ...t, commerceName: c.commerceName })
@@ -267,7 +308,7 @@ export const useScheduleStore = defineStore('schedule', () => {
         }
       }
       return tpl
-    } catch (e) {
+    } catch {
       // Una 404 al buscar template en otro commerce es esperado durante el
       // loop de "find-by-id" del editor — no es un error visible.
       return null
@@ -332,15 +373,16 @@ export const useScheduleStore = defineStore('schedule', () => {
 
   // ---------- Meshes ----------
 
-  // El backend scope-a mallas por commerce. Iteramos los accesibles y
-  // concatenamos. El filtro por allowedZoneIds y la dedupe quedan in-memory.
+  // El backend scope-a mallas por commerce. Iteramos los del scope actual
+  // (uno o todos según el sidebar) y concatenamos. allowedZoneIds queda
+  // delegado al backend para CA; SA no aplica filtro.
   async function fetchMeshes(): Promise<void> {
     isLoading.value = true
     error.value = null
     try {
       const collected: ScheduledMeshListItem[] = []
       const seen = new Set<string>()
-      for (const c of accessibleCommerces.value) {
+      for (const c of scopedCommerces.value) {
         const list = await ScheduleService.listMeshes(c.commerceId, {
           allowedZoneIds: allowedZoneIdsComputed.value,
         })
@@ -364,7 +406,9 @@ export const useScheduleStore = defineStore('schedule', () => {
     error.value = null
     try {
       // Si ya conocemos el commerce de este meshId, vamos directo. Si no,
-      // probamos contra cada commerce accesible hasta encontrarlo.
+      // probamos contra cada commerce ACCESIBLE (no scoped — el deep-link
+      // puede apuntar a una malla fuera del scope actual del sidebar y aun
+      // así el usuario tiene acceso) hasta encontrarla.
       const known = commerceIdForMesh(meshId)
       const candidates = known
         ? [known]
@@ -401,14 +445,16 @@ export const useScheduleStore = defineStore('schedule', () => {
   }
 
   // Devuelve la malla creada + warnings que el backend adjuntó (ej: items del
-  // template sin rider que no se materializaron). La UI muestra los warnings
-  // como toast informativo después de la navegación.
+  // template sin rider que no se materializaron). El callsite (modal) puede
+  // pasar `targetCommerceId` cuando SA elige un commerce en el form (solo
+  // aplica para zonas globales — para privadas mandan el zone.commerceId).
   async function createMesh(
     dto: CreateMeshDto,
+    options: { targetCommerceId?: string } = {},
   ): Promise<{ mesh: ScheduledMeshDetail; warnings: string[] }> {
     const zoneRef = resolveZoneRef(dto.zoneId)
     if (!zoneRef) throw new Error('La zona seleccionada ya no está disponible')
-    const commerceId = resolveMeshCommerceId(zoneRef)
+    const commerceId = resolveMeshCommerceId(zoneRef, options.targetCommerceId)
     if (!commerceId) throw new Error('No hay un comercio destino para alojar la malla')
 
     isSaving.value = true
@@ -608,19 +654,16 @@ export const useScheduleStore = defineStore('schedule', () => {
     currentTemplate.value = tpl
   }
 
-  // Al cambiar el set de commerces/rol, revalidamos todo.
-  watch([accessibleCommerces, isSuperAdmin], async () => {
-    meshes.value = []
-    templates.value = []
-    availableZones.value = []
-    currentMesh.value = null
-    currentTemplate.value = null
-    clearStructuredError()
+  // Cuando cambia el commerce activo del sidebar, limpiamos todo el state. El
+  // re-fetch lo decide cada página (la del dashboard re-bootea; las páginas
+  // de detalle se mantienen scoped a su entidad y no recargan el dashboard).
+  watch(activeCommerceId, () => {
+    resetState()
   })
 
   return {
     // state
-    accessibleCommerces, isSuperAdmin,
+    accessibleCommerces, isSuperAdmin, scopedCommerces, activeCommerceId,
     availableZones, riders, pdvs, zoneSummaries,
     templates, meshes, currentMesh, currentTemplate,
     meshZoneFilter, meshStatusFilter,
@@ -629,8 +672,9 @@ export const useScheduleStore = defineStore('schedule', () => {
     // getters
     filteredMeshes, totalTemplates, totalMeshes, publishedMeshes,
     riderById, pdvById, zoneById, commerceNameById, allowedZoneIdsComputed,
+    canQuery,
     // actions — bootstrap
-    configureAccess, fetchAvailableZones, loadCatalogsForCommerce,
+    fetchAvailableZones, loadCatalogsForCommerce,
     resolveZoneRef,
     // actions — templates
     fetchAllTemplates, fetchTemplateById, createTemplate, updateTemplate, deleteTemplate,
@@ -641,6 +685,6 @@ export const useScheduleStore = defineStore('schedule', () => {
     addShift, updateShift, removeShift,
     // filters / utils
     setMeshZoneFilter, setMeshStatusFilter, setCurrentMesh, setCurrentTemplate,
-    clearStructuredError,
+    clearStructuredError, resetState,
   }
 })

@@ -5,9 +5,8 @@ import Button from 'primevue/button'
 import Toast from 'primevue/toast'
 import DataTable, { type DataTableRowClickEvent } from 'primevue/datatable'
 import Column from 'primevue/column'
-import { useAuth } from '~/composables/useAuth'
 import { useAppToast } from '~/composables/useToast'
-import { useCommerceStore } from '~/modules/commerce/store/commerce.store'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { useScheduleStore, type TemplateWithCommerce } from '~/modules/schedule/store/schedule.store'
 import CreateMeshModal from '~/modules/schedule/components/CreateMeshModal.vue'
 import {
@@ -25,18 +24,12 @@ definePageMeta({
   allowedRoles: ['SuperAdmin', 'CommerceAdmin', 'Supervisor'],
 })
 
-interface CommerceOption {
-  commerceId: string
-  commerceName: string
-}
-
 const router = useRouter()
-const { user: authUser } = useAuth()
 const toast = useAppToast()
-const commerceStore = useCommerceStore()
+const activeCommerceStore = useActiveCommerceStore()
 const scheduleStore = useScheduleStore()
 
-const isSuperAdmin = computed<boolean>(() => authUser.value?.role === 'SuperAdmin')
+const isSuperAdmin = computed<boolean>(() => scheduleStore.isSuperAdmin)
 
 const showMeshModal = ref<boolean>(false)
 
@@ -60,21 +53,9 @@ const zoneFilterOptions = computed(() => [
 ])
 
 async function bootstrap(): Promise<void> {
-  // Compila la lista de commerces accesibles según el rol.
-  let commerces: CommerceOption[] = []
-  if (isSuperAdmin.value) {
-    if (commerceStore.commerces.length === 0) await commerceStore.fetchCommerces()
-    commerces = commerceStore.commerces.map((c) => ({
-      commerceId: c.id,
-      commerceName: c.name,
-    }))
-  } else {
-    commerces = [...(authUser.value?.commerces ?? [])]
-  }
-  scheduleStore.configureAccess({
-    isSuperAdmin: isSuperAdmin.value,
-    commerces,
-  })
+  // El sidebar ya provee la lista de commerces accesibles vía
+  // useActiveCommerceStore — el store de schedule la lee directamente y
+  // calcula el scope (todos para SA en "Todos", uno cuando hay activo).
   // Zonas accesibles — necesarias para el modal y para filtrar mallas.
   await scheduleStore.fetchAvailableZones()
   // Mallas + modelos en paralelo — ya tenemos availableZones para el filtro.
@@ -88,8 +69,11 @@ onMounted(async () => {
   await bootstrap()
 })
 
+// Cuando el usuario cambia el commerce en el sidebar, re-bootstrap. El store
+// se encarga de limpiar state internamente vía su watcher; acá disparamos las
+// fetches que la página espera ver.
 watch(
-  () => authUser.value?.id,
+  () => activeCommerceStore.activeCommerceId,
   async () => {
     await bootstrap()
   },

@@ -2,9 +2,8 @@
 import { computed, onMounted, ref } from 'vue'
 import Button from 'primevue/button'
 import Toast from 'primevue/toast'
-import { useAuth } from '~/composables/useAuth'
 import { useAppToast } from '~/composables/useToast'
-import { useCommerceStore } from '~/modules/commerce/store/commerce.store'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { useScheduleStore } from '~/modules/schedule/store/schedule.store'
 import ScheduleGrid from '~/modules/schedule/components/ScheduleGrid.vue'
 import CreateShiftModal from '~/modules/schedule/components/CreateShiftModal.vue'
@@ -27,16 +26,10 @@ definePageMeta({
   allowedRoles: ['SuperAdmin', 'CommerceAdmin', 'Supervisor'],
 })
 
-interface CommerceOption {
-  commerceId: string
-  commerceName: string
-}
-
 const route = useRoute()
 const router = useRouter()
-const { user: authUser } = useAuth()
 const toast = useAppToast()
-const commerceStore = useCommerceStore()
+const activeCommerceStore = useActiveCommerceStore()
 const scheduleStore = useScheduleStore()
 
 const meshId = computed<string>(() => String(route.params.id ?? ''))
@@ -62,33 +55,17 @@ const referencedTemplate = computed(() => {
   return scheduleStore.templates.find((t) => t.id === mesh.value?.templateId) ?? null
 })
 
-async function bootstrapAccess(): Promise<void> {
-  let commerces: CommerceOption[] = []
-  if (authUser.value?.role === 'SuperAdmin') {
-    if (commerceStore.commerces.length === 0) await commerceStore.fetchCommerces()
-    commerces = commerceStore.commerces.map((c) => ({
-      commerceId: c.id,
-      commerceName: c.name,
-    }))
-  } else {
-    commerces = [...(authUser.value?.commerces ?? [])]
-  }
-  scheduleStore.configureAccess({
-    isSuperAdmin: authUser.value?.role === 'SuperAdmin',
-    commerces,
-  })
+async function load(): Promise<void> {
+  isLoading.value = true
+  notFound.value = false
+  // Zonas y templates auxiliares — necesarios para el chip de zona en la
+  // cabecera y para mostrar "Basada en modelo …" si aplica.
   if (scheduleStore.availableZones.length === 0) {
     await scheduleStore.fetchAvailableZones()
   }
   if (scheduleStore.templates.length === 0) {
     await scheduleStore.fetchAllTemplates()
   }
-}
-
-async function load(): Promise<void> {
-  isLoading.value = true
-  notFound.value = false
-  await bootstrapAccess()
   const found = await scheduleStore.fetchMeshById(meshId.value)
   if (!found) {
     notFound.value = true
@@ -96,13 +73,14 @@ async function load(): Promise<void> {
     return
   }
   // Catálogos para el modal de turno: si la zona es privada, riders/pdvs del
-  // commerce dueño de la zona. Si es global, fallback al primer commerce
-  // accesible — el operador podrá asignar riders de ese commerce.
+  // commerce dueño de la zona. Si es global, fallback al activo del sidebar
+  // y, en última instancia, al primer commerce accesible.
   // TODO: para mallas de zona global considerar agregar selector de commerce
   // dentro del modal de turno.
   const catalogCommerceId =
     found.commerceId
-    ?? scheduleStore.accessibleCommerces[0]?.commerceId
+    ?? activeCommerceStore.activeCommerceId
+    ?? activeCommerceStore.accessibleCommerces[0]?.commerceId
     ?? null
   await scheduleStore.loadCatalogsForCommerce(catalogCommerceId)
   isLoading.value = false

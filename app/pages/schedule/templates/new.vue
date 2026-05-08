@@ -6,9 +6,8 @@ import Textarea from 'primevue/textarea'
 import Select from 'primevue/select'
 import Button from 'primevue/button'
 import Toast from 'primevue/toast'
-import { useAuth } from '~/composables/useAuth'
 import { useAppToast } from '~/composables/useToast'
-import { useCommerceStore } from '~/modules/commerce/store/commerce.store'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { useScheduleStore } from '~/modules/schedule/store/schedule.store'
 import TemplateShiftEditor from '~/modules/schedule/components/TemplateShiftEditor.vue'
 import { isValidTimeRange } from '~/modules/schedule/utils/schedule.utils'
@@ -22,15 +21,9 @@ definePageMeta({
   allowedRoles: ['SuperAdmin', 'CommerceAdmin', 'Supervisor'],
 })
 
-interface CommerceOption {
-  commerceId: string
-  commerceName: string
-}
-
 const router = useRouter()
-const { user: authUser } = useAuth()
 const toast = useAppToast()
-const commerceStore = useCommerceStore()
+const activeCommerceStore = useActiveCommerceStore()
 const scheduleStore = useScheduleStore()
 
 type TemplateShiftDraft = Omit<TemplateShift, 'id'>
@@ -55,12 +48,14 @@ const commerceError = ref<string | null>(null)
 const shiftErrors = ref<Array<Partial<Record<keyof TemplateShiftDraft, string>>>>([])
 const isSaving = computed<boolean>(() => scheduleStore.isSaving)
 
-const commerceOptions = computed<CommerceOption[]>(
-  () => scheduleStore.accessibleCommerces,
+const commerceOptions = computed(
+  () => activeCommerceStore.accessibleCommerces,
 )
 
+// SA siempre ve el selector (incluso con un solo commerce accesible es la
+// fuente explícita de destino). Los demás roles solo lo ven si tienen >1.
 const showCommerceSelector = computed<boolean>(
-  () => commerceOptions.value.length > 1,
+  () => scheduleStore.isSuperAdmin || commerceOptions.value.length > 1,
 )
 
 const schema = z.object({
@@ -79,24 +74,17 @@ const schema = z.object({
 })
 
 async function bootstrap(): Promise<void> {
-  let commerces: CommerceOption[] = []
-  if (authUser.value?.role === 'SuperAdmin') {
-    if (commerceStore.commerces.length === 0) await commerceStore.fetchCommerces()
-    commerces = commerceStore.commerces.map((c) => ({
-      commerceId: c.id,
-      commerceName: c.name,
-    }))
-  } else {
-    commerces = [...(authUser.value?.commerces ?? [])]
-  }
-  scheduleStore.configureAccess({
-    isSuperAdmin: authUser.value?.role === 'SuperAdmin',
-    commerces,
-  })
-  // Default: primer commerce accesible.
+  // El sidebar ya provee la lista accesible — el store la lee del active
+  // commerce store. Acá solo prefilleamos el commerce destino del modelo:
+  //   - Si hay activo en el sidebar → usamos ese (SA con commerce específico,
+  //     CA con uno o varios y uno seleccionado).
+  //   - Si "Todos los comercios" (SA + null) → queda vacío y el SA elige.
+  //   - Si solo hay un commerce accesible → forzamos ese.
   if (!form.commerceId) {
-    const first = commerces[0]
-    if (first) form.commerceId = first.commerceId
+    form.commerceId = activeCommerceStore.activeCommerceId
+      ?? (activeCommerceStore.accessibleCommerces.length === 1
+          ? activeCommerceStore.accessibleCommerces[0]?.commerceId ?? null
+          : null)
   }
   if (form.commerceId) {
     await scheduleStore.loadCatalogsForCommerce(form.commerceId)
@@ -107,8 +95,8 @@ onMounted(async () => {
   await bootstrap()
 })
 
-// Si el SA cambia de commerce, recargamos PdVs/zonas que alimentan los Selects
-// del editor de filas.
+// Si el usuario cambia de commerce destino en el form, recargamos los
+// catálogos (PdVs/zonas) que alimentan los Selects del editor de filas.
 watch(() => form.commerceId, async (id) => {
   if (id) await scheduleStore.loadCatalogsForCommerce(id)
 })

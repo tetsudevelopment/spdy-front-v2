@@ -6,6 +6,7 @@ import InputText from 'primevue/inputtext'
 import Select from 'primevue/select'
 import DatePicker from 'primevue/datepicker'
 import Button from 'primevue/button'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { useScheduleStore } from '../store/schedule.store'
 import type { CreateMeshDto } from '../types/schedule.types'
 import { getWeekRange, toIsoDate } from '../utils/schedule.utils'
@@ -21,6 +22,7 @@ const emit = defineEmits<{
 }>()
 
 const store = useScheduleStore()
+const activeCommerceStore = useActiveCommerceStore()
 
 const isBusy = computed<boolean>(() => store.isSaving)
 
@@ -29,6 +31,10 @@ interface FormState {
   weekRange: Date[] | null
   zoneId: string | null
   templateId: string | null
+  // Solo se usa para SA al elegir destino. Para CA queda implícito (su único
+  // / actual commerce). Para zonas privadas el backend usa zone.commerceId
+  // independiente de este valor; relevante para zonas globales.
+  targetCommerceId: string | null
 }
 
 function defaultWeekRange(): Date[] {
@@ -49,8 +55,15 @@ function emptyForm(): FormState {
     weekRange: defaultWeekRange(),
     zoneId: null,
     templateId: null,
+    // Prefill desde el commerce activo del sidebar — vacío en "Todos" para
+    // que el SA elija; pre-llenado y editable cuando hay uno específico.
+    targetCommerceId: activeCommerceStore.activeCommerceId,
   }
 }
+
+// SA elige commerce destino al crear. CA nunca lo ve (siempre implícito al
+// commerce del sidebar). En modo edición no aplica — el modal es solo creación.
+const showCommerceSelector = computed<boolean>(() => store.isSuperAdmin)
 
 const form = reactive<FormState>(emptyForm())
 const submitError = ref<string | null>(null)
@@ -177,6 +190,15 @@ function applyZodErrors(err: z.ZodError): void {
 async function handleSubmit(): Promise<void> {
   submitError.value = null
   fieldErrors.value = {}
+
+  // SA tiene que elegir commerce destino. Validamos pre-schema para mensaje
+  // claro en el campo correcto. Para CA el campo no se renderiza y la
+  // resolución cae al activo del sidebar dentro del store.
+  if (showCommerceSelector.value && !form.targetCommerceId) {
+    fieldErrors.value = { targetCommerceId: 'Selecciona el comercio destino' }
+    return
+  }
+
   const parsed = schema.safeParse(form)
   if (!parsed.success) {
     applyZodErrors(parsed.error)
@@ -196,7 +218,10 @@ async function handleSubmit(): Promise<void> {
   if (data.templateId) dto.fromTemplateId = data.templateId
 
   try {
-    const { mesh, warnings } = await store.createMesh(dto)
+    const targetCommerceId = showCommerceSelector.value && form.targetCommerceId
+      ? form.targetCommerceId
+      : undefined
+    const { mesh, warnings } = await store.createMesh(dto, { targetCommerceId })
     emit('created', { meshId: mesh.id, warnings })
     closeModal()
   } catch (e) {
@@ -223,6 +248,25 @@ async function handleSubmit(): Promise<void> {
   >
     <form class="form" @submit.prevent="handleSubmit">
       <div v-if="submitError" class="alert alert--error">{{ submitError }}</div>
+
+      <div v-if="showCommerceSelector" class="field">
+        <label class="field__label">Comercio destino <span class="field__req">*</span></label>
+        <Select
+          v-model="form.targetCommerceId"
+          :options="[...activeCommerceStore.accessibleCommerces]"
+          option-label="commerceName"
+          option-value="commerceId"
+          placeholder="Selecciona un comercio"
+          :class="{ 'field__input--error': fieldErrors.targetCommerceId }"
+        />
+        <span v-if="fieldErrors.targetCommerceId" class="field__error">
+          {{ fieldErrors.targetCommerceId }}
+        </span>
+        <span v-else class="field__hint">
+          Si la zona elegida es privada, la malla vivirá bajo el comercio dueño
+          de esa zona; este selector aplica solo cuando la zona es global.
+        </span>
+      </div>
 
       <div class="field">
         <label class="field__label">Nombre <span class="field__req">*</span></label>

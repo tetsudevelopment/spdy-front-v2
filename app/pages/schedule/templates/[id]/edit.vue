@@ -5,9 +5,8 @@ import InputText from 'primevue/inputtext'
 import Textarea from 'primevue/textarea'
 import Button from 'primevue/button'
 import Toast from 'primevue/toast'
-import { useAuth } from '~/composables/useAuth'
 import { useAppToast } from '~/composables/useToast'
-import { useCommerceStore } from '~/modules/commerce/store/commerce.store'
+import { useActiveCommerceStore } from '~/stores/active-commerce.store'
 import { useScheduleStore } from '~/modules/schedule/store/schedule.store'
 import TemplateShiftEditor from '~/modules/schedule/components/TemplateShiftEditor.vue'
 import { isValidTimeRange } from '~/modules/schedule/utils/schedule.utils'
@@ -21,16 +20,10 @@ definePageMeta({
   allowedRoles: ['SuperAdmin', 'CommerceAdmin', 'Supervisor'],
 })
 
-interface CommerceOption {
-  commerceId: string
-  commerceName: string
-}
-
 const route = useRoute()
 const router = useRouter()
-const { user: authUser } = useAuth()
 const toast = useAppToast()
-const commerceStore = useCommerceStore()
+const activeCommerceStore = useActiveCommerceStore()
 const scheduleStore = useScheduleStore()
 
 const templateId = computed<string>(() => String(route.params.id ?? ''))
@@ -73,33 +66,17 @@ const schema = z.object({
   ),
 })
 
-async function bootstrapAccess(): Promise<void> {
-  let commerces: CommerceOption[] = []
-  if (authUser.value?.role === 'SuperAdmin') {
-    if (commerceStore.commerces.length === 0) await commerceStore.fetchCommerces()
-    commerces = commerceStore.commerces.map((c) => ({
-      commerceId: c.id,
-      commerceName: c.name,
-    }))
-  } else {
-    commerces = [...(authUser.value?.commerces ?? [])]
-  }
-  scheduleStore.configureAccess({
-    isSuperAdmin: authUser.value?.role === 'SuperAdmin',
-    commerces,
-  })
-}
-
 async function load(): Promise<void> {
   isLoading.value = true
   notFound.value = false
-  await bootstrapAccess()
 
   // El endpoint del backend es /commerce/:cId/shift-templates/:tId — necesitamos
   // el commerceId para construir la URL. Cuando entramos por deep-link no lo
   // tenemos en el route, así que probamos secuencialmente cada commerce
-  // accesible hasta que uno responda 200. La 404 en el resto es esperada.
-  for (const c of scheduleStore.accessibleCommerces) {
+  // ACCESIBLE (no scoped — el deep-link puede apuntar a un template fuera del
+  // commerce activo del sidebar y aun así el usuario tiene acceso) hasta que
+  // uno responda 200. La 404 en el resto es esperada.
+  for (const c of activeCommerceStore.accessibleCommerces) {
     const tpl = await scheduleStore.fetchTemplateById(c.commerceId, templateId.value)
     if (tpl) {
       form.name = tpl.name
