@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import Tabs from 'primevue/tabs'
 import TabList from 'primevue/tablist'
 import Tab from 'primevue/tab'
@@ -7,6 +7,7 @@ import TabPanels from 'primevue/tabpanels'
 import TabPanel from 'primevue/tabpanel'
 import { useMonitoringStore } from '~/modules/monitoring/store/monitoring.store'
 import { useRiderTracking } from '~/modules/monitoring/composables/useRiderTracking'
+import { useAuthStore } from '~/stores/auth.store'
 import MonitoringKpis from '~/modules/monitoring/components/MonitoringKpis.vue'
 import ServicesFilters from '~/modules/monitoring/components/ServicesFilters.vue'
 import ServicesTable from '~/modules/monitoring/components/ServicesTable.vue'
@@ -14,6 +15,7 @@ import RidersActivePanel from '~/modules/monitoring/components/RidersActivePanel
 import RidersOfflinePanel from '~/modules/monitoring/components/RidersOfflinePanel.vue'
 import ZonesSidebar from '~/modules/monitoring/components/ZonesSidebar.vue'
 import ZonesMap from '~/modules/monitoring/components/ZonesMap.vue'
+import CreateServiceModal from '~/modules/monitoring/components/CreateServiceModal.vue'
 import type { MonitoringTab } from '~/modules/monitoring/types/monitoring.types'
 
 definePageMeta({
@@ -21,7 +23,14 @@ definePageMeta({
 })
 
 const store = useMonitoringStore()
+const auth = useAuthStore()
 const tracking = useRiderTracking()
+
+const showCreateModal = ref(false)
+
+const activeCommerceId = computed<string | null>(() => {
+  return auth.user?.commerces?.[0]?.commerceId ?? null
+})
 
 onMounted(async () => {
   await store.fetchZones()
@@ -35,7 +44,23 @@ function onTabChange(value: string | number): void {
 
 <template>
   <div class="monitoring">
-    <MonitoringKpis />
+    <div class="monitoring__header">
+      <MonitoringKpis />
+      <Button
+        v-if="activeCommerceId"
+        label="Nueva entrega"
+        icon="pi pi-plus"
+        class="monitoring__new-btn"
+        @click="showCreateModal = true"
+      />
+    </div>
+
+    <CreateServiceModal
+      v-if="activeCommerceId"
+      v-model:visible="showCreateModal"
+      :commerce-id="activeCommerceId"
+      @created="store.refreshAll()"
+    />
 
     <Tabs
       :value="store.activeTab"
@@ -88,6 +113,18 @@ function onTabChange(value: string | number): void {
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+
+.monitoring__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.monitoring__new-btn {
+  flex-shrink: 0;
 }
 
 .monitoring__tabs {

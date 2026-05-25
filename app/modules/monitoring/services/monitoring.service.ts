@@ -9,6 +9,7 @@ import type {
   PaginatedRidersResponse,
   PaginatedZonesResponse,
 } from '../types/monitoring.types'
+import type { OrderQuote, QuoteRequest, CreateOrderWithQuoteRequest } from '../types/quote.types'
 
 interface AuthScope {
   isSuperAdmin: boolean
@@ -121,5 +122,32 @@ export const MonitoringService = {
 
   async getZoneDetail(zoneId: string): Promise<MonitoringZone> {
     return authenticatedFetch<MonitoringZone>(`/zones/${zoneId}`)
+  },
+
+  /**
+   * Get a delivery price quote for an address.
+   * POST /commerce/:commerceId/orders/quote
+   * Always returns HTTP 200 (degraded=true on routing fallback).
+   */
+  async quoteOrder(commerceId: string, body: QuoteRequest): Promise<OrderQuote> {
+    return authenticatedFetch<OrderQuote>(`/commerce/${commerceId}/orders/quote`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+
+  /**
+   * Create a new delivery order.
+   * POST /commerce/:commerceId/orders
+   * Includes optional quote.expectedTotalCents for drift detection.
+   */
+  async createOrder(
+    commerceId: string,
+    body: CreateOrderWithQuoteRequest,
+  ): Promise<MonitoringOrder> {
+    return authenticatedFetch<MonitoringOrder>(`/commerce/${commerceId}/orders`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
   },
 }

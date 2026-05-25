@@ -12,6 +12,7 @@ import type {
   RiderVisualStatus,
   ServicesFilters,
 } from '../types/monitoring.types'
+import type { OrderQuote, QuoteRequest, CreateOrderWithQuoteRequest } from '../types/quote.types'
 
 const TERMINAL_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
   'entregado',
@@ -60,6 +61,11 @@ export const useMonitoringStore = defineStore('monitoring', () => {
   const error = ref<string | null>(null)
 
   const lastUpdatedAt = ref<string | null>(null)
+
+  // Quote state — single instance (D23: modal is single-instance, not a Map)
+  const lastQuote = ref<OrderQuote | null>(null)
+  const quoteLoading = ref<boolean>(false)
+  const quoteError = ref<string | null>(null)
 
   // Derivados
   const activeCommerceId = computed<string | null>(() => {
@@ -248,6 +254,45 @@ export const useMonitoringStore = defineStore('monitoring', () => {
     selectedZoneId.value = zoneId
   }
 
+  // ── Quote actions ──────────────────────────────────────────────────────────
+
+  async function quoteOrder(commerceId: string, body: QuoteRequest): Promise<OrderQuote | null> {
+    quoteLoading.value = true
+    quoteError.value = null
+    try {
+      const quote = await MonitoringService.quoteOrder(commerceId, body)
+      lastQuote.value = quote
+      return quote
+    } catch (err) {
+      quoteError.value = err instanceof Error ? err.message : 'Failed to get quote'
+      lastQuote.value = null
+      return null
+    } finally {
+      quoteLoading.value = false
+    }
+  }
+
+  async function createOrder(
+    commerceId: string,
+    body: CreateOrderWithQuoteRequest,
+  ): Promise<MonitoringOrder | null> {
+    try {
+      const order = await MonitoringService.createOrder(commerceId, body)
+      // Refresh orders list after successful creation
+      await fetchOrders()
+      return order
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : 'Failed to create order'
+      return null
+    }
+  }
+
+  function clearQuote(): void {
+    lastQuote.value = null
+    quoteError.value = null
+    quoteLoading.value = false
+  }
+
   return {
     // state
     activeTab,
@@ -261,6 +306,10 @@ export const useMonitoringStore = defineStore('monitoring', () => {
     isLoadingZones,
     error,
     lastUpdatedAt,
+    // quote state
+    lastQuote,
+    quoteLoading,
+    quoteError,
     // getters
     activeCommerceId,
     filteredOrders,
@@ -277,5 +326,9 @@ export const useMonitoringStore = defineStore('monitoring', () => {
     setTab,
     setFilters,
     selectZone,
+    // quote actions
+    quoteOrder,
+    createOrder,
+    clearQuote,
   }
 })

@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@mapbox/leaflet-omnivore": "^0.3.4",
+    "@mapbox/polyline": "^1.2.1",
     "@pinia/nuxt": "^0.11.3",
     "@primeuix/themes": "^2.0.3",
     "@primevue/nuxt-module": "^4.5.5",
