@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import Tabs from 'primevue/tabs'
 import TabList from 'primevue/tablist'
 import Tab from 'primevue/tab'
@@ -7,6 +7,7 @@ import TabPanels from 'primevue/tabpanels'
 import TabPanel from 'primevue/tabpanel'
 import { useMonitoringStore } from '~/modules/monitoring/store/monitoring.store'
 import { useRiderTracking } from '~/modules/monitoring/composables/useRiderTracking'
+import { useDashboardSocket } from '~/modules/monitoring/composables/useDashboardSocket'
 import { useAuthStore } from '~/stores/auth.store'
 import MonitoringKpis from '~/modules/monitoring/components/MonitoringKpis.vue'
 import ServicesFilters from '~/modules/monitoring/components/ServicesFilters.vue'
@@ -24,7 +25,19 @@ definePageMeta({
 
 const store = useMonitoringStore()
 const auth = useAuthStore()
-const tracking = useRiderTracking()
+
+// WebSocket real-time feed for order events.
+// The composable handles reconnection, auth rejection, and cleanup via onUnmounted.
+const { status: wsStatus, connect: wsConnect, close: wsClose } = useDashboardSocket(
+  store.handleWsMessage,
+)
+
+// Polling — periodic reconcile + fallback for global riders (no commerce).
+// Live positions for private (commerce) riders now arrive via rider_location WS events
+// and are stored in monitoring.store.riderLivePositions.
+// The 60 s interval is intentionally long; it is only a reconcile / safety net.
+// See useRiderTracking.ts for the full rationale.
+const tracking = useRiderTracking(60_000)
 
 const showCreateModal = ref(false)
 
@@ -34,7 +47,14 @@ const activeCommerceId = computed<string | null>(() => {
 
 onMounted(async () => {
   await store.fetchZones()
+  // Initial data load; WS events will keep orders up to date after this.
   await tracking.start()
+  // Connect the real-time dashboard socket.
+  wsConnect()
+})
+
+onUnmounted(() => {
+  wsClose()
 })
 
 function onTabChange(value: string | number): void {

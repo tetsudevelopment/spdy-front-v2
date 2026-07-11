@@ -18,6 +18,7 @@ const omni: ShallowRef<OmnivoreModule | null> = shallowRef(null)
 let mapInstance: import('leaflet').Map | null = null
 let kmlLayer: import('leaflet').Layer | null = null
 let riderLayerGroup: import('leaflet').LayerGroup | null = null
+let resizeObserver: ResizeObserver | null = null
 
 const tileUrl = computed<string>(
   () => useRuntimeConfig().public.mapTileUrl as string,
@@ -57,9 +58,13 @@ function escapeHtml(value: string): string {
 
 function buildRiderMarker(r: MonitoringRider): import('leaflet').CircleMarker | null {
   const L = leaflet.value
-  if (!L || r.currentLat == null || r.currentLng == null) return null
+  // Prefer the live WS position; fall back to the REST-loaded position.
+  const live = store.riderLivePositions.get(r.id)
+  const lat = live?.lat ?? r.currentLat
+  const lng = live?.lng ?? r.currentLng
+  if (!L || lat == null || lng == null) return null
   const color = statusColor(r)
-  const marker = L.circleMarker([r.currentLat, r.currentLng], {
+  const marker = L.circleMarker([lat, lng], {
     radius: 7,
     color: '#161616',
     weight: 2,
@@ -156,6 +161,16 @@ onMounted(async () => {
   L.tileLayer(tileUrl.value, { maxZoom: 19 }).addTo(mapInstance)
   renderZone()
   renderRiders()
+
+  // Leaflet sizes its tile grid from the container at init time. When the map
+  // mounts while its container is hidden or not yet laid out (inside the "Zonas"
+  // tab, or before the flex layout settles), the size is wrong and tiles render
+  // blank until something forces a resize — the classic "map only shows after
+  // opening DevTools" symptom. Recalculate once the element has its real size,
+  // and on every subsequent container resize (tab switches, sidebar, viewport).
+  requestAnimationFrame(() => mapInstance?.invalidateSize())
+  resizeObserver = new ResizeObserver(() => mapInstance?.invalidateSize())
+  resizeObserver.observe(mapEl.value)
 })
 
 watch(() => store.selectedZoneId, () => {
@@ -169,7 +184,40 @@ watch(
   { deep: true },
 )
 
+// Re-render markers whenever a live rider_location WS event updates a position
+// for any rider that belongs to the currently selected zone.
+watch(
+  () => store.riderLivePositions,
+  (positions) => {
+    const zoneRiderIds = new Set(store.ridersInSelectedZone.map((r) => r.id))
+    for (const riderId of positions.keys()) {
+      if (zoneRiderIds.has(riderId)) {
+        renderRiders()
+        break
+      }
+    }
+  },
+)
+
+// The map lives inside the (initially hidden) "Zonas" PrimeVue tab. A zone drawn
+// while the tab is hidden gets fitBounds-ed against a 0-size container, so it
+// looks blank until manually re-selected. When the tab becomes active, recompute
+// the Leaflet size and redraw the selected zone against the now-correct viewport.
+watch(
+  () => store.activeTab,
+  (tab) => {
+    if (tab !== 'zones') return
+    requestAnimationFrame(() => {
+      mapInstance?.invalidateSize()
+      renderZone()
+      renderRiders()
+    })
+  },
+)
+
 onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
+  resizeObserver = null
   clearRiderLayer()
   clearKmlLayer()
   if (mapInstance) {

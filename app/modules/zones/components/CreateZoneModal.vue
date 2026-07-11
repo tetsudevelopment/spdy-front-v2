@@ -17,6 +17,7 @@ import type {
   UpdateZoneDto,
   Zone,
 } from '../types/zone.types'
+import KmlFilePreview from './KmlFilePreview.vue'
 
 interface Props {
   visible: boolean
@@ -393,6 +394,13 @@ async function handleUpdate(data: z.infer<typeof schema>): Promise<void> {
           <span class="kml-row__hint">.kml o .kmz · máx 10 MB</span>
         </div>
         <span v-if="fileError" class="field__error">{{ fileError }}</span>
+      </div>
+
+      <!-- Vista previa del polígono del KML — se parsea en el cliente, sin
+           subir el archivo, para revisar la cobertura antes de guardar. -->
+      <div v-if="kmlFile" class="field">
+        <label class="field__label">Vista previa del polígono</label>
+        <KmlFilePreview :file="kmlFile" :color="form.color" />
       </div>
     </form>
 

@@ -13,6 +13,19 @@ import type {
   ServicesFilters,
 } from '../types/monitoring.types'
 import type { OrderQuote, QuoteRequest, CreateOrderWithQuoteRequest } from '../types/quote.types'
+import type { WsMessage } from '../types/ws.types'
+
+// Live GPS position received via rider_location WS events.
+export interface RiderLivePosition {
+  lat: number
+  lng: number
+  accuracy?: number
+  speed?: number
+  heading?: number
+  recordedAt?: string
+  /** Wall-clock time this frontend received the update (ISO string). */
+  updatedAt: string
+}
 
 const TERMINAL_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
   'entregado',
@@ -61,6 +74,11 @@ export const useMonitoringStore = defineStore('monitoring', () => {
   const error = ref<string | null>(null)
 
   const lastUpdatedAt = ref<string | null>(null)
+
+  // Live GPS positions received via rider_location WS events.
+  // Key: riderId. Value: latest position snapshot.
+  // Updated surgically on each rider_location event — no full refetch needed.
+  const riderLivePositions = ref<Map<string, RiderLivePosition>>(new Map())
 
   // Quote state — single instance (D23: modal is single-instance, not a Map)
   const lastQuote = ref<OrderQuote | null>(null)
@@ -293,6 +311,67 @@ export const useMonitoringStore = defineStore('monitoring', () => {
     quoteLoading.value = false
   }
 
+  // ── WebSocket real-time feed ──────────────────────────────────────────────
+  //
+  // The store exposes a typed message handler that the monitoring page
+  // passes to useDashboardSocket(). The socket lifecycle (connect/close) lives
+  // in the page component so it ties to the component's onMounted/onUnmounted.
+  // This follows the repo convention: composables manage lifecycle, stores manage state.
+
+  function handleWsMessage(msg: WsMessage): void {
+    if (msg.type === 'connected') {
+      // Server confirmed subscription rooms — no state change needed.
+      return
+    }
+
+    if (msg.type === 'order_status_change') {
+      const { orderId, toStatus } = msg.data
+      const idx = orders.value.findIndex((o) => o.id === orderId)
+      if (idx !== -1) {
+        // Surgical patch — no full refetch needed when order is in the list
+        orders.value[idx] = {
+          ...orders.value[idx]!,
+          status: toStatus as OrderStatus,
+          updatedAt: msg.data.changedAt,
+        }
+        lastUpdatedAt.value = new Date().toISOString()
+      } else {
+        // Order not in current list (different page/filter) — fall back to refetch
+        void fetchOrders()
+      }
+      return
+    }
+
+    if (msg.type === 'new_order') {
+      // WS event carries only IDs, not the full MonitoringOrder shape — refetch.
+      void fetchOrders()
+      return
+    }
+
+    if (msg.type === 'rider_location') {
+      const { riderId, lat, lng, accuracy, speed, heading, recordedAt } = msg.data
+      // Store the live position regardless of whether the rider is in the
+      // current riders[] list — the map watcher will pick it up either way.
+      // If the rider is NOT in the list (global rider, different scope), the
+      // position is stored but not rendered (graceful ignore at render time).
+      riderLivePositions.value.set(riderId, {
+        lat,
+        lng,
+        accuracy,
+        speed,
+        heading,
+        recordedAt,
+        updatedAt: new Date().toISOString(),
+      })
+      // Trigger reactivity: replace the Map reference so Vue watchers fire.
+      riderLivePositions.value = new Map(riderLivePositions.value)
+      return
+    }
+
+    // msg.type === 'error' with 'unauthorized' is intercepted inside useDashboardSocket
+    // before reaching this callback; no action needed here.
+  }
+
   return {
     // state
     activeTab,
@@ -306,6 +385,7 @@ export const useMonitoringStore = defineStore('monitoring', () => {
     isLoadingZones,
     error,
     lastUpdatedAt,
+    riderLivePositions,
     // quote state
     lastQuote,
     quoteLoading,
@@ -330,5 +410,7 @@ export const useMonitoringStore = defineStore('monitoring', () => {
     quoteOrder,
     createOrder,
     clearQuote,
+    // ws handler (used by useDashboardSocket on the monitoring page)
+    handleWsMessage,
   }
 })
